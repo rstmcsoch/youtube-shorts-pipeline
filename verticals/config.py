@@ -225,7 +225,8 @@ def get_60db_key() -> str:
 
 
 def get_gemini_key() -> str:
-    return _get_key("GEMINI_API_KEY")
+    """Read Gemini's preferred secret name, with the Engine A name as fallback."""
+    return _get_key("GEMINI_API_KEY") or _get_key("GOOGLE_API_KEY")
 
 
 
