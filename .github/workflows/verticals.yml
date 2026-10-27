@@ -172,6 +172,10 @@ jobs:
           git rebase "origin/$BRANCH_NAME"
           git push origin "HEAD:$BRANCH_NAME"
 
+      - name: Explain full-phase review gate
+        if: ${{ inputs.phase == 'full' && (inputs.auto_publish != '1' || inputs.review_required != '0') }}
+        run: echo "::notice::The video was generated as a draft only. Upload is blocked unless auto_publish=1 and review_required=0."
+
       - name: Upload the draft and media for a later publish run
         uses: actions/upload-artifact@v4
         with:
@@ -184,7 +188,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: ${{ always() && (inputs.phase == 'publish' || (inputs.phase == 'full' && needs.produce.result == 'success')) }}
+    if: ${{ always() && (inputs.phase == 'publish' || (inputs.phase == 'full' && needs.produce.result == 'success' && inputs.auto_publish == '1' && inputs.review_required == '0')) }}
     needs: [produce]
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -223,6 +227,10 @@ jobs:
         id: locate
         run: |
           set -euo pipefail
+          if ! [[ "$DYPOL_JOB_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then
+            echo "::error::DYPOL job_id may contain only letters, numbers, dot, underscore, and hyphen."
+            exit 2
+          fi
           if [ "$PHASE" = "full" ]; then
             PRODUCING_RUN="$GITHUB_RUN_ID"
             DRAFT_SOURCE="same-run"
