@@ -53,17 +53,17 @@ def _save_portrait(path: Path) -> None:
     """Crop an image to the engine's 9:16 video dimensions."""
     with Image.open(path) as source:
         img = source.convert("RGB")
-        target_w, target_h = VIDEO_WIDTH, VIDEO_HEIGHT
-        orig_w, orig_h = img.size
-        if orig_w < 1 or orig_h < 1:
-            raise ValueError("Image has invalid dimensions")
-        scale = max(target_w / orig_w, target_h / orig_h)
-        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-        img = img.resize((new_w, new_h), Image.LANCZOS)
-        left = max(0, (new_w - target_w) // 2)
-        top = max(0, (new_h - target_h) // 2)
-        img = img.crop((left, top, left + target_w, top + target_h))
-        img.save(path, format="PNG")
+    target_w, target_h = VIDEO_WIDTH, VIDEO_HEIGHT
+    orig_w, orig_h = img.size
+    if orig_w < 1 or orig_h < 1:
+        raise ValueError("Image has invalid dimensions")
+    scale = max(target_w / orig_w, target_h / orig_h)
+    new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    left = max(0, (new_w - target_w) // 2)
+    top = max(0, (new_h - target_h) // 2)
+    img = img.crop((left, top, left + target_w, top + target_h))
+    img.save(path, format="PNG")
 
 
 def _pexels_fallback(prompt: str, output_path: Path) -> bool:
