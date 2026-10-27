@@ -15,6 +15,10 @@ on:
         description: 'Topic to create; leave blank for auto-discovery'
         required: false
         default: ''
+      context:
+        description: 'Optional channel context for the script'
+        required: false
+        default: ''
       niche:
         description: 'Content niche slug'
         required: true
@@ -176,6 +180,7 @@ jobs:
             .verticals-runtime/drafts/**
             .verticals-runtime/media/**
           retention-days: 14
+          include-hidden-files: true
           if-no-files-found: error
 
   publish:
@@ -312,7 +317,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          DRAFT="${DRAFT:-${{ steps.draft.outputs.draft }}}"
+          DRAFT="${DRAFT:-}"
           if [ -n "$DRAFT" ] && [ -f "$DRAFT" ]; then
             python3 scripts/report_upload.py \
               --draft "$DRAFT" \
