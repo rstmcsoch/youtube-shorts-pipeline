@@ -152,42 +152,79 @@ def _call_minimax(prompt: str, max_tokens: int) -> str:
 
 
 def _call_gemini(prompt: str, max_tokens: int) -> str:
-    """Call Gemini via Google AI API."""
+    """Call Gemini with a short fallback cascade for transient model capacity errors."""
+    import time
     import requests
 
     api_key = get_gemini_key()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
-    model = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-            "temperature": 0.7,
-        },
-    }
-    r = requests.post(
-        url, json=body, timeout=60,
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+    primary = (os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash").strip()
+    configured = os.environ.get(
+        "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
     )
-    if r.status_code != 200:
-        hint = ""
-        if r.status_code == 403:
-            hint = (
-                " — check that GEMINI_API_KEY is set in this environment and is "
-                "an AI Studio key (https://aistudio.google.com/apikey), not a "
-                "Vertex AI / service-account credential"
-            )
-        raise RuntimeError(f"Gemini API {r.status_code}: {r.text[:300]}{hint}")
+    models = list(dict.fromkeys([primary] + [m.strip() for m in configured.split(",") if m.strip()]))
+    last_error = None
 
-    data = r.json()
-    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    text = " ".join(p.get("text", "") for p in parts).strip()
-    if not text:
-        raise RuntimeError("Empty response from Gemini")
-    return text
+    for index, model in enumerate(models):
+        url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": 0.7,
+            },
+        }
+        try:
+            response = requests.post(
+                url, json=body, timeout=60,
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            )
+        except requests.RequestException as exc:
+            last_error = exc
+            if index == len(models) - 1:
+                raise RuntimeError(f"Gemini request failed for all configured models: {exc}") from exc
+            log(f"Gemini model {model} network error; trying fallback {models[index + 1]}.")
+            time.sleep(min(2 ** index, 4))
+            continue
+
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+                detail = error_data.get("error", {}).get("message", response.text[:300])
+            except Exception:
+                detail = response.text[:300]
+            last_error = RuntimeError(f"Gemini API {response.status_code} ({model}): {detail}")
+            if response.status_code in (408, 429, 500, 502, 503, 504) and index < len(models) - 1:
+                log(
+                    f"Gemini model {model} returned HTTP {response.status_code}; "
+                    f"trying fallback {models[index + 1]}."
+                )
+                time.sleep(min(2 ** index, 4))
+                continue
+            hint = ""
+            if response.status_code == 403:
+                hint = (
+                    " — check that GEMINI_API_KEY or GOOGLE_API_KEY is set in repository "
+                    "Actions secrets and is an AI Studio key"
+                )
+            raise RuntimeError(f"Gemini API {response.status_code} ({model}): {detail}{hint}")
+
+        data = response.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts).strip()
+        if text:
+            if index:
+                log(f"Gemini request succeeded with fallback model {model}.")
+            return text
+
+        last_error = RuntimeError(f"Empty response from Gemini model {model}")
+        if index < len(models) - 1:
+            log(f"Gemini model {model} returned empty text; trying fallback {models[index + 1]}.")
+            time.sleep(min(2 ** index, 4))
+
+    raise last_error or RuntimeError("All configured Gemini models failed.")
 
 
 def _call_openai(prompt: str, max_tokens: int) -> str:
