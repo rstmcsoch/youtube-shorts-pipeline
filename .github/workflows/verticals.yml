@@ -67,8 +67,9 @@ jobs:
     if: github.ref_name == 'main'
     runs-on: ubuntu-latest
     steps:
-      - name: Keep production disabled on main
+      - name: Stop with branch-selection instructions
         run: |
-          echo "This workflow is a safe dispatch entry point."
-          echo "Select the dypol-integration branch from the Run workflow dropdown."
-          echo "No video generation or upload is performed from main."
+          echo "::error::You launched Engine B from main, which is intentionally disabled."
+          echo "::error::Go to Actions > DYPOL Verticals production > Run workflow and select dypol-integration in the branch dropdown."
+          echo "No video generation or upload was performed."
+          exit 1
