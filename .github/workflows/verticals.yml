@@ -1,0 +1,74 @@
+name: DYPOL Verticals production
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Draft only, publish a saved draft, or full (only with auto-publish enabled)'
+        required: true
+        default: 'draft'
+        type: choice
+        options: [draft, publish, full]
+      topic:
+        description: 'Topic to create; leave blank for auto-discovery'
+        required: false
+        default: ''
+      niche:
+        description: 'Content niche slug'
+        required: true
+        default: 'tech'
+      language:
+        description: 'Voice and captions language'
+        required: true
+        default: 'en'
+        type: choice
+        options: [en, hi, es, pt, de, fr, ja, ko]
+      privacy:
+        description: 'YouTube visibility'
+        required: true
+        default: 'private'
+        type: choice
+        options: [private, unlisted, public]
+      job_id:
+        description: 'DYPOL job ID connecting draft and publish'
+        required: false
+        default: ''
+      draft_run_id:
+        description: 'Original run ID if publishing a saved draft'
+        required: false
+        default: ''
+      context:
+        description: 'Optional channel context'
+        required: false
+        default: ''
+      title_override:
+        description: 'Reviewed title override'
+        required: false
+        default: ''
+      description_override:
+        description: 'Reviewed description override'
+        required: false
+        default: ''
+      tags_override:
+        description: 'Reviewed comma-separated tags'
+        required: false
+        default: ''
+      review_required:
+        description: 'Keep 1 to block full-phase publishing'
+        required: true
+        default: '1'
+      auto_publish:
+        description: 'Keep 0 to prevent automatic publishing'
+        required: true
+        default: '0'
+
+jobs:
+  main-branch-safety-notice:
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep production disabled on main
+        run: |
+          echo "This workflow is a safe dispatch entry point."
+          echo "Select the dypol-integration branch from the Run workflow dropdown."
+          echo "No video generation or upload is performed from main."
