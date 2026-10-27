@@ -1,5 +1,6 @@
 """YouTube API upload + thumbnail + captions."""
 
+import os
 from pathlib import Path
 
 from .config import get_youtube_token_path, write_secret_file
@@ -36,17 +37,31 @@ def upload_to_youtube(
     youtube = build("youtube", "v3", credentials=creds)
     log(f"Uploading {video_path.name}...")
 
+    approved = draft.get("upload_metadata") or {}
+    title = str(approved.get("title") or draft.get("youtube_title") or draft.get("news") or "Untitled Video")[:100]
+    description = str(approved.get("description") if approved.get("description") is not None else draft.get("youtube_description", ""))
+    raw_tags = approved.get("tags") if approved.get("tags") is not None else draft.get("youtube_tags", "")
+    if isinstance(raw_tags, str):
+        tags = [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
+    else:
+        tags = [str(tag).strip() for tag in (raw_tags or []) if str(tag).strip()]
+    privacy = str(approved.get("privacy") or os.environ.get("YOUTUBE_PRIVACY_STATUS", "private")).strip().lower()
+    if privacy not in {"private", "unlisted", "public"}:
+        raise ValueError(f"Invalid YouTube privacy status {privacy!r}; refusing upload.")
     body = {
         "snippet": {
-            "title": draft.get("youtube_title", draft["news"])[:100],
-            "description": draft.get("youtube_description", ""),
-            "tags": draft.get("youtube_tags", "").split(","),
+            "title": title,
+            "description": description,
+            "tags": tags,
             "categoryId": "20",
             "defaultLanguage": lang,
             "defaultAudioLanguage": lang,
         },
-        "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False},
+        "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
     }
+    # Safety gate: the exact insert body must match the reviewed visibility.
+    if body["status"]["privacyStatus"] != privacy:
+        raise RuntimeError("YouTube insert body visibility mismatch; upload refused.")
 
     media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True)
     req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
