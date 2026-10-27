@@ -159,10 +159,8 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta"
-        "/models/gemini-2.0-flash:generateContent"
-    )
+    model = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
