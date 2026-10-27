@@ -1,100 +1,165 @@
 """Gemini Imagen b-roll generation + Ken Burns animation."""
 
 import base64
+import json
+import os
 from pathlib import Path
 
 import requests
 from PIL import Image
 
-from .config import VIDEO_WIDTH, VIDEO_HEIGHT, get_gemini_key, run_cmd
+from .config import VIDEO_WIDTH, VIDEO_HEIGHT, get_gemini_key, get_gemini_image_model, get_pexels_key, run_cmd
 from .log import log
 from .retry import with_retry
 
 
 @with_retry(max_retries=3, base_delay=2.0)
-def _generate_image_gemini(prompt: str, output_path: Path, api_key: str):
-    """Generate image via Gemini native image generation (free tier compatible)."""
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta"
-        "/models/gemini-2.0-flash-exp-image-generation:generateContent"
-    )
+def _generate_image_gemini(prompt: str, output_path: Path, api_key: str, model: str):
+    """Generate a portrait image through the current Gemini generateContent API."""
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
     body = {
-        "contents": [{"parts": [{"text": f"Generate an image: {prompt}"}]}],
-        "generationConfig": {"responseModalities": ["IMAGE", "TEXT"]},
+        "contents": [{"parts": [{"text": f"Create a high-quality, visually clear vertical 9:16 b-roll image for this short video scene: {prompt}. No text, no watermarks, cinematic but realistic."}]}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": "9:16",
+                "imageSize": os.environ.get("GEMINI_IMAGE_SIZE", "1K"),
+            },
+        },
     }
-    r = requests.post(
-        url, json=body, timeout=90,
+    timeout = float(os.environ.get("GEMINI_IMAGE_TIMEOUT", "90"))
+    response = requests.post(
+        url,
+        json=body,
+        timeout=timeout,
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
-    if r.status_code != 200:
+    if response.status_code != 200:
         try:
-            detail = r.json().get("error", {}).get("message", r.text[:200])
+            detail = response.json().get("error", {}).get("message", response.text[:250])
         except Exception:
-            detail = r.text[:200]
-        hint = ""
-        if r.status_code == 403:
-            hint = (
-                " — check that GEMINI_API_KEY is set in this environment and is "
-                "an AI Studio key (https://aistudio.google.com/apikey), not a "
-                "Vertex AI / service-account credential"
-            )
-        raise RuntimeError(f"Gemini API {r.status_code}: {detail}{hint}")
-    data = r.json()
-    # Extract image from response parts
+            detail = response.text[:250]
+        raise RuntimeError(f"Gemini image API {response.status_code} for {model}: {detail}")
+    data = response.json()
     for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
-        if "inlineData" in part:
-            img_b64 = part["inlineData"]["data"]
-            output_path.write_bytes(base64.b64decode(img_b64))
+        inline = part.get("inlineData") or part.get("inline_data")
+        if inline and inline.get("data"):
+            output_path.write_bytes(base64.b64decode(inline["data"]))
             return
-    raise RuntimeError("No image in Gemini response")
+    raise RuntimeError(f"Gemini image API returned no image for model {model}")
+
+
+def _save_portrait(path: Path) -> None:
+    """Crop an image to the engine's 9:16 video dimensions."""
+    with Image.open(path) as source:
+        img = source.convert("RGB")
+        target_w, target_h = VIDEO_WIDTH, VIDEO_HEIGHT
+        orig_w, orig_h = img.size
+        if orig_w < 1 or orig_h < 1:
+            raise ValueError("Image has invalid dimensions")
+        scale = max(target_w / orig_w, target_h / orig_h)
+        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        left = max(0, (new_w - target_w) // 2)
+        top = max(0, (new_h - target_h) // 2)
+        img = img.crop((left, top, left + target_w, top + target_h))
+        img.save(path, format="PNG")
+
+
+def _pexels_fallback(prompt: str, output_path: Path) -> bool:
+    """Try a Pexels portrait stock image when Gemini generation is unavailable."""
+    key = get_pexels_key()
+    if not key:
+        return False
+    try:
+        response = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": key},
+            params={"query": " ".join(str(prompt).split()[:8]), "orientation": "portrait", "per_page": 1},
+            timeout=25,
+        )
+        response.raise_for_status()
+        photos = response.json().get("photos", [])
+        if not photos:
+            return False
+        src = photos[0].get("src", {})
+        image_url = src.get("portrait") or src.get("large2x") or src.get("large")
+        if not image_url:
+            return False
+        image_response = requests.get(image_url, timeout=30)
+        image_response.raise_for_status()
+        output_path.write_bytes(image_response.content)
+        _save_portrait(output_path)
+        return True
+    except Exception as exc:
+        log(f"Pexels fallback failed: {exc}")
+        return False
 
 
 def _fallback_frame(i: int, out_dir: Path) -> Path:
-    """Solid colour fallback frame if Gemini fails."""
-    colors = [(20, 20, 60), (40, 10, 40), (10, 30, 50)]
-    img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), colors[i % len(colors)])
+    """Deterministic gradient fallback; never pretend it was AI-generated."""
+    palettes = [((13, 24, 52), (55, 24, 84)), ((10, 42, 48), (24, 30, 70)), ((46, 22, 30), (18, 28, 56))]
+    top, bottom = palettes[i % len(palettes)]
+    img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT))
+    pixels = img.load()
+    for y in range(VIDEO_HEIGHT):
+        ratio = y / max(1, VIDEO_HEIGHT - 1)
+        color = tuple(int(top[c] * (1 - ratio) + bottom[c] * ratio) for c in range(3))
+        for x in range(VIDEO_WIDTH):
+            pixels[x, y] = color
     path = out_dir / f"broll_{i}.png"
     img.save(path)
     return path
 
 
 def generate_broll(prompts: list, out_dir: Path) -> list[Path]:
-    """Generate 3 b-roll frames via Gemini Imagen, with fallback."""
+    """Generate up to three frames with ordered fallbacks and source manifest."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prompt_list = list(prompts or [])[:3] or ["Cinematic technology background"]
     api_key = get_gemini_key()
-    if not api_key:
-        log(
-            "GEMINI_API_KEY not set — using solid-color fallback frames. "
-            "Get an AI Studio key at https://aistudio.google.com/apikey "
-            "(must be an AI Studio key; Vertex AI / service-account credentials "
-            "are rejected with a 403 'unregistered callers' error)."
-        )
-        return [_fallback_frame(i, out_dir) for i in range(min(3, max(len(prompts), 1)))]
+    configured = os.environ.get("GEMINI_IMAGE_MODELS", "").strip()
+    models = [m.strip() for m in configured.split(",") if m.strip()] if configured else [
+        get_gemini_image_model(), "gemini-3.1-flash-image", "gemini-3-pro-image"
+    ]
+    # Keep model order deterministic while removing accidental duplicates.
+    models = list(dict.fromkeys(models))
+    manifest = []
     frames = []
 
-    for i, prompt in enumerate(prompts[:3]):
+    for i, prompt in enumerate(prompt_list):
         out_path = out_dir / f"broll_{i}.png"
-        log(f"Generating b-roll frame {i+1}/3 via Gemini Imagen...")
+        source, used_model = "gradient", None
+        if api_key:
+            for model in models:
+                try:
+                    log(f"Generating b-roll frame {i + 1}/{len(prompt_list)} with {model}...")
+                    _generate_image_gemini(str(prompt), out_path, api_key, model)
+                    _save_portrait(out_path)
+                    source, used_model = "gemini", model
+                    break
+                except Exception as exc:
+                    log(f"Gemini image model {model} failed: {exc}")
+        else:
+            log("GEMINI_API_KEY not set; trying configured non-AI fallbacks.")
 
-        try:
-            _generate_image_gemini(prompt, out_path, api_key)
+        if source != "gemini":
+            if _pexels_fallback(str(prompt), out_path):
+                source = "pexels"
+            else:
+                _fallback_frame(i, out_dir).replace(out_path)
+                source = "gradient"
+        frames.append(out_path)
+        manifest.append({
+            "frame": out_path.name,
+            "prompt": str(prompt),
+            "source": source,
+            "model": used_model,
+        })
 
-            # Resize/crop to 9:16 portrait
-            img = Image.open(out_path).convert("RGB")
-            target_w, target_h = VIDEO_WIDTH, VIDEO_HEIGHT
-            orig_w, orig_h = img.size
-            scale = max(target_w / orig_w, target_h / orig_h)
-            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-            left = (new_w - target_w) // 2
-            top = (new_h - target_h) // 2
-            img = img.crop((left, top, left + target_w, top + target_h))
-            img.save(out_path)
-            frames.append(out_path)
-
-        except Exception as e:
-            log(f"Frame {i+1} failed: {e} — using fallback")
-            frames.append(_fallback_frame(i, out_dir))
-
+    manifest_path = out_dir / "broll_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    log(f"B-roll source manifest saved: {manifest_path}")
     return frames
 
 
