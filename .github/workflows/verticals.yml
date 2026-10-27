@@ -82,7 +82,7 @@ jobs:
       actions: read
     env:
       VERTICALS_HOME: ${{ github.workspace }}/.verticals-runtime
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GOOGLE_API_KEY }}
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
@@ -113,11 +113,15 @@ jobs:
           pip install -r requirements.txt
           python -m compileall -q verticals scripts
 
-      - name: Validate DYPOL job ID and prepare runtime folders
+      - name: Validate DYPOL job ID and Gemini key
         run: |
           set -euo pipefail
           if ! [[ "$DYPOL_JOB_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then
             echo "::error::DYPOL job_id may contain only letters, numbers, dot, underscore, and hyphen."
+            exit 2
+          fi
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
+            echo "::error::Gemini API key is not available to this workflow. Add a repository Actions secret named GEMINI_API_KEY or GOOGLE_API_KEY in Settings > Secrets and variables > Actions."
             exit 2
           fi
           mkdir -p "$VERTICALS_HOME/drafts" "$VERTICALS_HOME/media"
