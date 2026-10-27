@@ -15,16 +15,19 @@ from .retry import with_retry
 
 @with_retry(max_retries=3, base_delay=2.0)
 def _generate_image_gemini(prompt: str, output_path: Path, api_key: str, model: str):
-    """Generate a portrait image through the current Gemini generateContent API."""
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent"
+    """Generate an image using Gemini's native image Interactions API."""
+    url = "https://generativelanguage.googleapis.com/v1beta/interactions"
     body = {
-        "contents": [{"parts": [{"text": f"Create a high-quality, visually clear vertical 9:16 b-roll image for this short video scene: {prompt}. No text, no watermarks, cinematic but realistic."}]}],
-        "generationConfig": {
-            "responseModalities": ["TEXT", "IMAGE"],
-            "imageConfig": {
-                "aspectRatio": "9:16",
-                "imageSize": os.environ.get("GEMINI_IMAGE_SIZE", "1K"),
-            },
+        "model": model,
+        "input": [{"type": "text", "text": (
+            f"Create a high-quality, visually clear vertical 9:16 b-roll image for this short video scene: "
+            f"{prompt}. No text, no watermarks, cinematic but realistic."
+        )}],
+        "response_format": {
+            "type": "image",
+            "mime_type": "image/png",
+            "aspect_ratio": "9:16",
+            "image_size": os.environ.get("GEMINI_IMAGE_SIZE", "1K"),
         },
     }
     timeout = float(os.environ.get("GEMINI_IMAGE_TIMEOUT", "90"))
@@ -39,14 +42,30 @@ def _generate_image_gemini(prompt: str, output_path: Path, api_key: str, model: 
             detail = response.json().get("error", {}).get("message", response.text[:250])
         except Exception:
             detail = response.text[:250]
-        raise RuntimeError(f"Gemini image API {response.status_code} for {model}: {detail}")
+        raise RuntimeError(f"Gemini image Interactions API {response.status_code} for {model}: {detail}")
+
     data = response.json()
-    for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
-        inline = part.get("inlineData") or part.get("inline_data")
-        if inline and inline.get("data"):
-            output_path.write_bytes(base64.b64decode(inline["data"]))
-            return
-    raise RuntimeError(f"Gemini image API returned no image for model {model}")
+    # The API's interaction object exposes output_image; tolerate raw output blocks
+    # too, because the REST response can include individual model-output steps.
+    image_data = (data.get("output_image") or {}).get("data")
+    if not image_data:
+        for block in data.get("output", []) or []:
+            if isinstance(block, dict) and block.get("type") in {"image", "image_output"}:
+                image_data = block.get("data") or (block.get("image") or {}).get("data")
+                if image_data:
+                    break
+    if not image_data:
+        for step in data.get("steps", []) or []:
+            for block in step.get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") in {"image", "image_output"}:
+                    image_data = block.get("data") or (block.get("image") or {}).get("data")
+                    if image_data:
+                        break
+            if image_data:
+                break
+    if not image_data:
+        raise RuntimeError(f"Gemini Interactions API returned no image for model {model}")
+    output_path.write_bytes(base64.b64decode(image_data))
 
 
 def _save_portrait(path: Path) -> None:
