@@ -59,8 +59,9 @@ def upload_to_youtube(
         },
         "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
     }
-    # Safety gate: the exact insert body must match the reviewed visibility.
-    if body["status"]["privacyStatus"] != privacy:
+    # Safety gate: the insert body must match both the reviewer choice and the workflow policy.
+    expected_privacy = str(os.environ.get("YOUTUBE_PRIVACY_STATUS", privacy) or privacy).strip().lower()
+    if privacy != expected_privacy or body["status"]["privacyStatus"] != expected_privacy:
         raise RuntimeError("YouTube insert body visibility mismatch; upload refused.")
 
     media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True)
