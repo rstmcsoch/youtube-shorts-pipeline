@@ -1,0 +1,347 @@
+name: DYPOL Verticals production
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Draft only, publish a saved draft, or full (only with auto-publish enabled)'
+        required: true
+        default: 'draft'
+        type: choice
+        options: [draft, publish, full]
+      topic:
+        description: 'Topic to create; leave blank for auto-discovery'
+        required: false
+        default: ''
+      niche:
+        description: 'Content niche slug'
+        required: true
+        default: 'tech'
+      language:
+        description: 'Voice and captions language'
+        required: true
+        default: 'en'
+        type: choice
+        options: [en, hi, es, pt, de, fr, ja, ko]
+      privacy:
+        description: 'YouTube visibility; private is recommended for first tests'
+        required: true
+        default: 'private'
+        type: choice
+        options: [private, unlisted, public]
+      job_id:
+        description: 'DYPOL job ID connecting draft and publish'
+        required: false
+        default: ''
+      draft_run_id:
+        description: 'Producing run ID if no durable draft snapshot is available'
+        required: false
+        default: ''
+      title_override:
+        description: 'Reviewed title override'
+        required: false
+        default: ''
+      description_override:
+        description: 'Reviewed description override'
+        required: false
+        default: ''
+      tags_override:
+        description: 'Reviewed comma-separated tags'
+        required: false
+        default: ''
+      review_required:
+        description: 'Keep 1 to block full-phase publishing'
+        required: true
+        default: '1'
+      auto_publish:
+        description: 'Set 1 only after intentionally enabling automatic uploads'
+        required: true
+        default: '0'
+
+concurrency:
+  group: dypol-verticals-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  produce:
+    if: ${{ github.event_name == 'schedule' || inputs.phase != 'publish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: read
+    env:
+      VERTICALS_HOME: ${{ github.workspace }}/.verticals-runtime
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
+      TOPIC: ${{ inputs.topic || '' }}
+      NICHE: ${{ inputs.niche || 'tech' }}
+      CONTEXT: ${{ inputs.context || '' }}
+      LANGUAGE: ${{ inputs.language || 'en' }}
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate DYPOL job ID and prepare runtime folders
+        run: |
+          set -euo pipefail
+          if ! [[ "$DYPOL_JOB_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then
+            echo "::error::DYPOL job_id may contain only letters, numbers, dot, underscore, and hyphen."
+            exit 2
+          fi
+          mkdir -p "$VERTICALS_HOME/drafts" "$VERTICALS_HOME/media"
+
+      - name: Generate a draft without uploading
+        env:
+          GEMINI_TEXT_MODEL: ${{ vars.GEMINI_TEXT_MODEL || 'gemini-3.8-flash' }}
+        run: |
+          set -euo pipefail
+          ARGS=(--niche "$NICHE" --platform shorts --provider gemini --context "$CONTEXT")
+          if [ -n "$TOPIC" ]; then
+            ARGS+=(--topic "$TOPIC")
+          else
+            ARGS+=(--discover --auto-pick)
+          fi
+          python -m verticals draft "${ARGS[@]}"
+          DRAFT=$(ls -t "$VERTICALS_HOME"/drafts/*.json 2>/dev/null | head -n 1 || true)
+          if [ -z "$DRAFT" ]; then
+            echo "::error::Draft generation completed without a draft JSON file."
+            exit 1
+          fi
+          python -m verticals produce --draft "$DRAFT" --lang "$LANGUAGE" --voice edge
+          echo "Draft and media were produced. No YouTube upload was run in this job."
+
+      - name: Save durable handoff record
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          DRAFT=$(ls -t "$VERTICALS_HOME"/drafts/*.json 2>/dev/null | head -n 1 || true)
+          if [ -z "$DRAFT" ] || [ ! -f "$DRAFT" ]; then
+            echo "::error::Cannot persist handoff: draft file is missing."
+            exit 1
+          fi
+          mkdir -p dypol-drafts
+          python3 - "$DRAFT" "$DYPOL_JOB_ID" <<'PY'
+          import json, os, sys
+          draft_file, job_id = sys.argv[1], sys.argv[2]
+          draft = json.load(open(draft_file, encoding="utf-8"))
+          snapshot = {
+              "job_id": job_id,
+              "producing_run_id": os.environ["GITHUB_RUN_ID"],
+              "artifact_name": f"draft-{job_id}",
+              "draft_file": os.path.basename(draft_file),
+              "language": os.environ.get("LANGUAGE", "en"),
+              "title": draft.get("youtube_title", ""),
+              "topic": draft.get("news", ""),
+          }
+          with open(f"dypol-drafts/{job_id}.json", "w", encoding="utf-8") as f:
+              json.dump(snapshot, f, indent=2)
+          print(f"Saved handoff record for job {job_id}")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add "dypol-drafts/$DYPOL_JOB_ID.json"
+          git commit -m "dypol: save draft handoff for $DYPOL_JOB_ID" || true
+          git fetch origin "$BRANCH_NAME"
+          git rebase "origin/$BRANCH_NAME"
+          git push origin "HEAD:$BRANCH_NAME"
+
+      - name: Upload the draft and media for a later publish run
+        uses: actions/upload-artifact@v4
+        with:
+          name: draft-${{ inputs.job_id || github.run_id }}
+          path: |
+            .verticals-runtime/drafts/**
+            .verticals-runtime/media/**
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    if: ${{ always() && (inputs.phase == 'publish' || (inputs.phase == 'full' && needs.produce.result == 'success')) }}
+    needs: [produce]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    env:
+      VERTICALS_HOME: ${{ github.workspace }}/.verticals-runtime
+      YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+      DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
+      PHASE: ${{ inputs.phase || 'draft' }}
+      REQUESTED_DRAFT_RUN_ID: ${{ inputs.draft_run_id || '' }}
+      PRIVACY: ${{ inputs.privacy || 'private' }}
+      LANGUAGE: ${{ inputs.language || 'en' }}
+      TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
+      DESCRIPTION_OVERRIDE: ${{ inputs.description_override || '' }}
+      TAGS_OVERRIDE: ${{ inputs.tags_override || '' }}
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Resolve the exact producing run
+        id: locate
+        run: |
+          set -euo pipefail
+          if [ "$PHASE" = "full" ]; then
+            PRODUCING_RUN="$GITHUB_RUN_ID"
+            DRAFT_SOURCE="same-run"
+          elif [ -f "dypol-drafts/$DYPOL_JOB_ID.json" ]; then
+            PRODUCING_RUN=$(python3 -c "import json; print(json.load(open('dypol-drafts/$DYPOL_JOB_ID.json'))['producing_run_id'])")
+            DRAFT_SOURCE="durable-snapshot"
+          elif [ -n "$REQUESTED_DRAFT_RUN_ID" ]; then
+            PRODUCING_RUN="$REQUESTED_DRAFT_RUN_ID"
+            DRAFT_SOURCE="explicit-run-id"
+          else
+            echo "::error::No saved draft record found for job $DYPOL_JOB_ID. Supply draft_run_id or create a new draft first."
+            exit 2
+          fi
+          if ! [[ "$PRODUCING_RUN" =~ ^[0-9]+$ ]]; then
+            echo "::error::The producing run ID is invalid."
+            exit 2
+          fi
+          echo "producing_run=$PRODUCING_RUN" >> "$GITHUB_OUTPUT"
+          echo "draft_source=$DRAFT_SOURCE" >> "$GITHUB_OUTPUT"
+
+      - name: Download the exact saved draft and its media
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-${{ inputs.job_id || github.run_id }}
+          run-id: ${{ steps.locate.outputs.producing_run }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: .verticals-runtime
+
+      - name: Restore YouTube OAuth token
+        run: |
+          set -euo pipefail
+          if [ -z "$YOUTUBE_TOKEN_JSON" ]; then
+            echo "::error::YOUTUBE_TOKEN_JSON secret is missing; upload was not attempted."
+            exit 2
+          fi
+          mkdir -p "$VERTICALS_HOME"
+          printf '%s' "$YOUTUBE_TOKEN_JSON" > "$VERTICALS_HOME/youtube_token.json"
+          chmod 600 "$VERTICALS_HOME/youtube_token.json"
+
+      - name: Locate and validate the approved draft
+        id: draft
+        run: |
+          set -euo pipefail
+          EXPECTED="$VERTICALS_HOME/drafts"
+          DRAFT="$EXPECTED/$(
+            python3 - "$DYPOL_JOB_ID" "$VERTICALS_HOME" <<'PY'
+          import json, os, sys
+          job_id, home = sys.argv[1], sys.argv[2]
+          snapshot_path = os.path.join("dypol-drafts", job_id + ".json")
+          if os.path.isfile(snapshot_path):
+              print(json.load(open(snapshot_path, encoding="utf-8")).get("draft_file", ""))
+          else:
+              files = sorted(
+                  [f for f in os.listdir(os.path.join(home, "drafts")) if f.endswith(".json")],
+                  key=lambda f: os.path.getmtime(os.path.join(home, "drafts", f)),
+                  reverse=True,
+              )
+              print(files[0] if files else "")
+          PY
+          )"
+          if [ ! -f "$DRAFT" ]; then
+            echo "::error::The saved draft JSON is missing at $DRAFT. No upload was attempted."
+            exit 2
+          fi
+          python3 scripts/apply_draft_overrides.py --draft "$DRAFT" --lang "$LANGUAGE" --validate
+          echo "draft=$DRAFT" >> "$GITHUB_OUTPUT"
+          echo "DRAFT=$DRAFT" >> "$GITHUB_ENV"
+
+      - name: Apply reviewed metadata and show insert-body preview
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_draft_overrides.py --draft "$DRAFT" --lang "$LANGUAGE" --apply \
+            --title "$TITLE_OVERRIDE" \
+            --description "$DESCRIPTION_OVERRIDE" \
+            --tags "$TAGS_OVERRIDE" \
+            --privacy "$PRIVACY" \
+            --print-insert-body
+
+      - name: Upload the reviewed video to YouTube
+        env:
+          YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy || 'private' }}
+        run: |
+          set -euo pipefail
+          python -m verticals upload --draft "$DRAFT" --lang "$LANGUAGE"
+
+      - name: Write verified upload result
+        if: always()
+        env:
+          PRODUCING_RUN_ID: ${{ steps.locate.outputs.producing_run }}
+          DRAFT_SOURCE: ${{ steps.locate.outputs.draft_source }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          DRAFT="${DRAFT:-${{ steps.draft.outputs.draft }}}"
+          if [ -n "$DRAFT" ] && [ -f "$DRAFT" ]; then
+            python3 scripts/report_upload.py \
+              --draft "$DRAFT" \
+              --job-id "$DYPOL_JOB_ID" \
+              --run-id "$RUN_ID" \
+              --producing-run-id "$PRODUCING_RUN_ID" \
+              --draft-source "$DRAFT_SOURCE" \
+              --out "dypol-results/$RUN_ID.json" || true
+          fi
+          if [ -f "dypol-results/$RUN_ID.json" ]; then
+            mkdir -p upload-backup
+            cp "dypol-results/$RUN_ID.json" upload-backup/upload_result.json
+            git config user.name 'github-actions[bot]'
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git add "dypol-results/$RUN_ID.json"
+            git commit -m "dypol: verified upload result for $RUN_ID" || true
+            BRANCH_NAME="${GITHUB_REF_NAME}"
+            git fetch origin "$BRANCH_NAME"
+            git rebase "origin/$BRANCH_NAME"
+            git push origin "HEAD:$BRANCH_NAME"
+          else
+            echo "No verified upload ID found; no result file was written."
+          fi
+
+      - name: Back up result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upload-result-${{ github.run_id }}
+          path: upload-backup/
+          retention-days: 14
+          if-no-files-found: ignore
