@@ -201,6 +201,7 @@ jobs:
       DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
       PHASE: ${{ inputs.phase || 'draft' }}
       REQUESTED_DRAFT_RUN_ID: ${{ inputs.draft_run_id || '' }}
+      REQUESTED_JOB_ID: ${{ inputs.job_id || '' }}
       PRIVACY: ${{ inputs.privacy || 'private' }}
       LANGUAGE: ${{ inputs.language || 'en' }}
       TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
@@ -237,11 +238,11 @@ jobs:
           elif [ -f "dypol-drafts/$DYPOL_JOB_ID.json" ]; then
             PRODUCING_RUN=$(python3 -c "import json; print(json.load(open('dypol-drafts/$DYPOL_JOB_ID.json'))['producing_run_id'])")
             DRAFT_SOURCE="durable-snapshot"
-          elif [ -n "$REQUESTED_DRAFT_RUN_ID" ]; then
+          elif [ -n "$REQUESTED_DRAFT_RUN_ID" ] && [ -n "$REQUESTED_JOB_ID" ]; then
             PRODUCING_RUN="$REQUESTED_DRAFT_RUN_ID"
             DRAFT_SOURCE="explicit-run-id"
           else
-            echo "::error::No saved draft record found for job $DYPOL_JOB_ID. Supply draft_run_id or create a new draft first."
+            echo "::error::No saved draft record found. Supply BOTH the original job_id and draft_run_id, or create a new draft first."
             exit 2
           fi
           if ! [[ "$PRODUCING_RUN" =~ ^[0-9]+$ ]]; then
