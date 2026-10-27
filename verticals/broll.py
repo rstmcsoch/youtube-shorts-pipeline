@@ -147,7 +147,7 @@ def generate_broll(prompts: list, out_dir: Path) -> list[Path]:
             if _pexels_fallback(str(prompt), out_path):
                 source = "pexels"
             else:
-                _fallback_frame(i, out_dir).replace(out_path)
+                _fallback_frame(i, out_dir)
                 source = "gradient"
         frames.append(out_path)
         manifest.append({
