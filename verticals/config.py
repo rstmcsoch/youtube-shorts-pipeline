@@ -10,7 +10,7 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────
 # Skill home directory — all data lives here
 # ─────────────────────────────────────────────────────
-SKILL_DIR = Path.home() / ".verticals"
+SKILL_DIR = Path(os.environ.get("VERTICALS_HOME", str(Path.home() / ".verticals"))).expanduser()
 DRAFTS_DIR = SKILL_DIR / "drafts"
 MEDIA_DIR = SKILL_DIR / "media"
 LOGS_DIR = SKILL_DIR / "logs"
@@ -226,6 +226,17 @@ def get_60db_key() -> str:
 
 def get_gemini_key() -> str:
     return _get_key("GEMINI_API_KEY")
+
+
+
+def get_pexels_key() -> str:
+    """Optional Pexels API key for stock-photo b-roll fallback."""
+    return _get_key("PEXELS_API_KEY")
+
+
+def get_gemini_image_model() -> str:
+    """Image model used for new b-roll generation; override through environment."""
+    return os.environ.get("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
 
 
 def get_youtube_token_path() -> Path:
