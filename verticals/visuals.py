@@ -46,10 +46,18 @@ def _allowed_wikimedia_license(info):
     name = str(info.get("name") or "").strip().casefold()
     url = str(info.get("url") or "").casefold()
     text = " ".join((short, name, url))
-    # Strict allowlist: no attribution-required Creative Commons licenses.
-    if "cc-by" in text or "cc-by-sa" in text or "cc-by-nc" in text:
+    # Explicit allowlist only. Reject attribution/share-alike licenses first.
+    if any(term in text for term in ("cc-by", "cc by", "attribution", "share-alike", "share alike")):
         return False
-    return any(term in text for term in ALLOWED_WIKIMEDIA_LICENSES)
+    if short in {"cc0", "cc zero", "pd-mark", "public domain mark", "public domain"}:
+        return True
+    if "public domain" in name or "public domain" in short:
+        return True
+    if "creativecommons.org/publicdomain/zero/" in url:
+        return True
+    if "pd-mark" in url or "publicdomain/mark/" in url:
+        return True
+    return False
 
 
 def _download_candidate(candidate, output_path):
