@@ -129,60 +129,93 @@ def _fallback_frame(i: int, out_dir: Path) -> Path:
     return path
 
 
-def generate_broll(prompts: list, out_dir: Path) -> list[Path]:
-    """Generate up to three frames with ordered fallbacks and source manifest."""
+def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = None) -> list[Path]:
+    """Resolve real visuals through rights-gated providers, then gradient fallback."""
+    from .visuals import select_visual
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt_list = list(prompts or [])[:3] or ["Cinematic technology background"]
-    api_key = get_gemini_key()
-    configured = os.environ.get("GEMINI_IMAGE_MODELS", "").strip()
-    models = [m.strip() for m in configured.split(",") if m.strip()] if configured else [
-        get_gemini_image_model(), "gemini-3.1-flash-image", "gemini-3-pro-image"
-    ]
-    # Keep model order deterministic while removing accidental duplicates.
-    models = list(dict.fromkeys(models))
+    intents = list(visual_intents or [])
+    while len(intents) < len(prompt_list):
+        prompt = str(prompt_list[len(intents)])
+        intents.append({
+            "type": "concept", "segment": prompt, "entities": [],
+            "keywords": prompt.split()[:12], "real_image_essential": False,
+        })
+
     manifest = []
     frames = []
-
+    used_hashes = set()
+    review_required = False
     for i, prompt in enumerate(prompt_list):
         out_path = out_dir / f"broll_{i}.png"
-        source, used_model = "gradient", None
-        if api_key:
-            for model in models:
-                try:
-                    log(f"Generating b-roll frame {i + 1}/{len(prompt_list)} with {model}...")
-                    _generate_image_gemini(str(prompt), out_path, api_key, model)
-                    _save_portrait(out_path)
-                    source, used_model = "gemini", model
-                    break
-                except Exception as exc:
-                    message = str(exc)
-                    log(f"Gemini image model {model} failed: {message}")
-                    # HTTP 400 response-format errors are deterministic; stop trying models.
-                    if "Interactions API 400" in message and ("response_format" in message or "mime_type" in message):
-                        log("Gemini rejected the image response format; skipping remaining models.")
-                        break
+        intent = dict(intents[i])
+        intent.setdefault("prompt", str(prompt))
+        metadata, needs_review = select_visual(intent, out_path, used_hashes)
+        review_required = review_required or needs_review
+        source = metadata.get("provider", "gradient")
+        if source == "gradient":
+            _fallback_frame(i, out_dir)
         else:
-            log("GEMINI_API_KEY not set; trying configured non-AI fallbacks.")
-
-        if source != "gemini":
-            if _pexels_fallback(str(prompt), out_path):
-                source = "pexels"
-            else:
+            try:
+                _save_portrait(out_path)
+                metadata["sha256"] = __import__("hashlib").sha256(out_path.read_bytes()).hexdigest()
+            except Exception as exc:
+                log(f"Selected visual could not be normalized; using gradient: {exc}")
                 _fallback_frame(i, out_dir)
+                metadata = {
+                    "provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
+                    "license": "Original generated gradient", "license_url": "",
+                    "retrieved_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    "sha256": "",
+                }
                 source = "gradient"
+                if intent.get("type") in {"news_event", "product"} and intent.get("real_image_essential"):
+                    review_required = True
         frames.append(out_path)
         manifest.append({
             "frame": out_path.name,
-            "prompt": str(prompt),
-            "source": source,
-            "model": used_model,
+            "segment": str(intent.get("segment") or prompt),
+            "intent": {key: intent.get(key) for key in ("type", "entities", "keywords", "real_image_essential")},
+            "provider": metadata.get("provider", source),
+            "source_url": metadata.get("source_url", ""),
+            "asset_id": metadata.get("asset_id", ""),
+            "license": metadata.get("license", ""),
+            "license_url": metadata.get("license_url", ""),
+            "retrieved_at": metadata.get("retrieved_at", ""),
+            "sha256": metadata.get("sha256", ""),
+            "relevance_score": metadata.get("relevance_score"),
+            "max_shot_seconds": 5 if metadata.get("provider") in {"wikimedia_commons", "pixabay"} else None,
         })
 
     manifest_path = out_dir / "broll_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    log(f"B-roll source manifest saved: {manifest_path}")
+    manifest_path.write_text(json.dumps({
+        "assets": manifest,
+        "review_required": review_required,
+        "review_reasons": ["A news/product segment requiring a real image used a fallback."] if review_required else [],
+        "credits": _generic_visual_credits(manifest),
+    }, indent=2), encoding="utf-8")
+    (out_dir / "visual_review_required.json").write_text(
+        json.dumps({"review_required": review_required}, indent=2), encoding="utf-8"
+    )
+    log(f"B-roll source manifest saved: {manifest_path}; review_required={review_required}")
     return frames
+
+
+def _generic_visual_credits(manifest: list[dict]) -> str:
+    """Credits are deliberately generic; never expose creator/photographer names."""
+    providers = {item.get("provider") for item in manifest}
+    labels = []
+    if "pixabay" in providers:
+        labels.append("Pixabay")
+    if "wikimedia_commons" in providers:
+        labels.append("Wikimedia Commons (public domain)")
+    if "cloudflare_workers_ai" in providers:
+        labels.append("AI-generated (FLUX)")
+    if "gemini" in providers:
+        labels.append("AI-generated")
+    return "Visuals: " + ", ".join(labels) if labels else ""
 
 
 def animate_frame(img_path: Path, out_path: Path, duration: float, effect: str = "zoom_in"):
