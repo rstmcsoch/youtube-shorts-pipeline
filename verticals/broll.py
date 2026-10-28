@@ -148,11 +148,41 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
     frames = []
     used_hashes = set()
     review_required = False
+    gemini_disabled = False
+    gemini_key = get_gemini_key()
+    gemini_first_try = os.environ.get("ENABLE_GEMINI_IMAGE_FIRST_TRY", "0").strip() == "1"
+    gemini_models = [m.strip() for m in os.environ.get("GEMINI_IMAGE_MODELS", get_gemini_image_model()).split(",") if m.strip()]
     for i, prompt in enumerate(prompt_list):
         out_path = out_dir / f"broll_{i}.png"
         intent = dict(intents[i])
         intent.setdefault("prompt", str(prompt))
-        metadata, needs_review = select_visual(intent, out_path, used_hashes)
+        metadata = None
+        needs_review = False
+        # Optional single-model fast path. Disabled by default; a zero-quota 429
+        # disables further Gemini attempts for this job immediately.
+        if gemini_first_try and gemini_key and not gemini_disabled:
+            model = gemini_models[0] if gemini_models else get_gemini_image_model()
+            try:
+                _generate_image_gemini(str(prompt), out_path, gemini_key, model)
+                _save_portrait(out_path)
+                digest = __import__("hashlib").sha256(out_path.read_bytes()).hexdigest()
+                if digest not in used_hashes:
+                    used_hashes.add(digest)
+                    metadata = {
+                        "provider": "gemini", "source_url": "", "asset_id": model,
+                        "license": "AI-generated; review applicable model terms", "license_url": "",
+                        "retrieved_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                        "sha256": digest,
+                    }
+                else:
+                    out_path.unlink(missing_ok=True)
+            except Exception as exc:
+                message = str(exc).casefold()
+                log(f"Optional Gemini image attempt skipped: {exc}")
+                if "429" in message and ("limit: 0" in message or "quota" in message):
+                    gemini_disabled = True
+        if metadata is None:
+            metadata, needs_review = select_visual(intent, out_path, used_hashes)
         review_required = review_required or needs_review
         source = metadata.get("provider", "gradient")
         if source == "gradient":
