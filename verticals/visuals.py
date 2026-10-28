@@ -197,6 +197,17 @@ def select_visual(intent, output_path, used_hashes=None):
         for candidate in ranked:
             if not candidate.get("download_url"):
                 continue
+            score = relevance_score(candidate, intent)
+            if score < 0.20:
+                continue
+            if int(candidate.get("width") or 0) < 360 or int(candidate.get("height") or 0) < 640:
+                continue
+            if kind in {"news_event", "product"} and intent.get("entities"):
+                entity_terms = _tokens(" ".join(intent.get("entities") or []))
+                title_terms = _tokens(candidate.get("title", ""))
+                entity_match = len(entity_terms & title_terms) / max(1, len(entity_terms))
+                if entity_match < 0.25:
+                    continue
             try:
                 metadata = _download_candidate(candidate, output_path)
                 digest = metadata["sha256"]
