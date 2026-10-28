@@ -84,6 +84,9 @@ jobs:
       VERTICALS_HOME: ${{ github.workspace }}/.verticals-runtime
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GOOGLE_API_KEY }}
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
       TOPIC: ${{ inputs.topic || '' }}
@@ -173,6 +176,8 @@ jobs:
               "language": os.environ.get("LANGUAGE", "en"),
               "title": draft.get("youtube_title", ""),
               "topic": draft.get("news", ""),
+              "review_required": bool(draft.get("review_required", True)),
+              "visual_manifest": draft.get("broll_manifest", ""),
           }
           with open(f"dypol-drafts/{job_id}.json", "w", encoding="utf-8") as f:
               json.dump(snapshot, f, indent=2)
@@ -212,6 +217,7 @@ jobs:
     env:
       VERTICALS_HOME: ${{ github.workspace }}/.verticals-runtime
       YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || secrets.GOOGLE_API_KEY }}
       DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
       PHASE: ${{ inputs.phase || 'draft' }}
       REQUESTED_DRAFT_RUN_ID: ${{ inputs.draft_run_id || '' }}
