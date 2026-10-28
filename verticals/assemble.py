@@ -43,14 +43,45 @@ def assemble_video(
     """Assemble final video from frames, voiceover, captions, and music."""
     log("Assembling video...")
     duration = get_audio_duration(voiceover)
-    per_frame = duration / len(frames)
     effects = ["zoom_in", "pan_right", "zoom_out"]
 
-    # Animate each frame with Ken Burns effect
-    animated = []
+    # Third-party stills are limited to 5 seconds per shot. The remaining
+    # narration uses original gradients rather than silently extending a
+    # licensed still beyond the editorial cap.
+    manifest_path = Path(out_dir) / "broll_manifest.json"
+    try:
+        manifest = __import__("json").loads(manifest_path.read_text(encoding="utf-8"))
+        asset_rows = manifest.get("assets", [])
+    except (OSError, ValueError, AttributeError):
+        asset_rows = []
+    shots = []
+    remaining = duration
     for i, frame in enumerate(frames):
+        if remaining <= 0:
+            break
+        row = asset_rows[i] if i < len(asset_rows) else {}
+        provider = row.get("provider", "")
+        is_third_party = provider in {"pixabay", "wikimedia_commons"}
+        shot_duration = min(5.0, remaining) if is_third_party else min(remaining, max(5.0, duration / max(1, len(frames))))
+        shots.append((frame, shot_duration, i))
+        remaining -= shot_duration
+        if is_third_party and remaining > 0:
+            from .broll import _fallback_frame
+            filler = _fallback_frame(100 + i, Path(out_dir))
+            filler_duration = min(remaining, max(0.0, duration / max(1, len(frames)) - shot_duration))
+            if filler_duration > 0:
+                shots.append((filler, filler_duration, i + 1))
+                remaining -= filler_duration
+    if remaining > 0:
+        from .broll import _fallback_frame
+        filler = _fallback_frame(200, Path(out_dir))
+        shots.append((filler, remaining, len(shots)))
+
+    # Animate each shot with Ken Burns effect
+    animated = []
+    for i, (frame, shot_duration, effect_index) in enumerate(shots):
         anim = out_dir / f"anim_{i}.mp4"
-        animate_frame(frame, anim, per_frame + 0.1, effects[i % len(effects)])
+        animate_frame(frame, anim, shot_duration + 0.1, effects[effect_index % len(effects)])
         animated.append(anim)
 
     # Concat animated segments (escape single quotes for ffmpeg concat demuxer)
