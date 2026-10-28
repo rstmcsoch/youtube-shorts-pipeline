@@ -10,10 +10,8 @@ from PIL import Image
 
 from .config import VIDEO_WIDTH, VIDEO_HEIGHT, get_gemini_key, get_gemini_image_model, get_pexels_key, run_cmd
 from .log import log
-from .retry import with_retry
 
 
-@with_retry(max_retries=3, base_delay=2.0)
 def _generate_image_gemini(prompt: str, output_path: Path, api_key: str, model: str):
     """Generate an image using Gemini's native image Interactions API."""
     url = "https://generativelanguage.googleapis.com/v1beta/interactions"
@@ -25,7 +23,7 @@ def _generate_image_gemini(prompt: str, output_path: Path, api_key: str, model: 
         )}],
         "response_format": {
             "type": "image",
-            "mime_type": "image/png",
+            "mime_type": "image/jpeg",
             "aspect_ratio": "9:16",
             "image_size": os.environ.get("GEMINI_IMAGE_SIZE", "1K"),
         },
@@ -158,7 +156,12 @@ def generate_broll(prompts: list, out_dir: Path) -> list[Path]:
                     source, used_model = "gemini", model
                     break
                 except Exception as exc:
-                    log(f"Gemini image model {model} failed: {exc}")
+                    message = str(exc)
+                    log(f"Gemini image model {model} failed: {message}")
+                    # HTTP 400 response-format errors are deterministic; stop trying models.
+                    if "Interactions API 400" in message and ("response_format" in message or "mime_type" in message):
+                        log("Gemini rejected the image response format; skipping remaining models.")
+                        break
         else:
             log("GEMINI_API_KEY not set; trying configured non-AI fallbacks.")
 
