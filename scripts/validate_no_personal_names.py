@@ -26,10 +26,13 @@ def scan_text(text):
     hits = []
     for match in NAME_RUN.finditer(text):
         phrase = match.group(0)
-        if all(word in ALLOWED for word in phrase.split()):
-            continue
-        if phrase in {"YouTube Shorts", "Instagram Reels", "Artificial Intelligence",
-                      "Machine Learning", "Future of Work", "AI Video Agents"}:
+        words = phrase.split()
+        # Headline/title case is common for ordinary English words. Only treat a
+        # multiword phrase as a likely name when it contains at least two tokens
+        # outside the common-English/technology vocabulary. This preserves
+        # "Jane Doe" while avoiding title fragments such as "Agents Are Changing Video".
+        unknown_words = [word for word in words if word not in ALLOWED]
+        if len(unknown_words) < 2:
             continue
         hits.append(phrase)
     hits.extend(match.group(0) for match in NAME_HINT.finditer(text))
