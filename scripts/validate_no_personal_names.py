@@ -18,6 +18,8 @@ ALLOWED = {
     "Moody", "High", "Detail", "Shallow", "Future", "Work", "Replacing",
     "Editors", "Agents", "Explained", "Breaking", "Watch", "Discover", "Changing", "Editing", "Forever", "Are", "Is", "By", "For", "And", "Of", "With", "From", "On", "In", "To", "At", "As", "Over"
 }
+# Organizations, markets and places that appear in tech-news scripts (not personal names).
+ALLOWED |= {"Associated", "Press", "Wall", "Street", "Nasdaq", "Claude", "Broadcom", "Oracle", "Intel", "AMD", "Tesla", "SpaceX", "Samsung", "Reuters", "Bloomberg", "Silicon", "Valley", "Securities", "Exchange", "Commission", "Stock", "Market", "Federal", "Reserve", "United", "States", "Big", "IPO", "History", "Biggest", "Coming", "Public", "Offering", "Initial", "Blackstone"}
 NAME_RUN = re.compile(r"\b[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?){1,3}\b")
 NAME_HINT = re.compile(r"\b(?:Elon|Sundar|Satya|Jensen|Demis|Dario|Sam Altman|Mark Zuckerberg|Bill Gates|Steve Jobs|Tim Cook)\b", re.I)
 
