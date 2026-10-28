@@ -184,7 +184,7 @@ Output JSON exactly:
   "script": "...",
   "broll_prompts": ["prompt for frame 1", "prompt for frame 2", "prompt for frame 3"],
   "visual_intents": [
-    {"type":"news_event|product|concept|data|transition","segment":"matching narration segment","entities":["company or product"],"keywords":["visual keywords"],"real_image_essential":false}
+    {{"type":"news_event|product|concept|data|transition","segment":"matching narration segment","entities":["company or product"],"keywords":["visual keywords"],"real_image_essential":false}}
   ],
   "youtube_title": "...",
   "youtube_description": "...",
