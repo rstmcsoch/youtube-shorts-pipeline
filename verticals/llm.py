@@ -74,7 +74,13 @@ def _ollama_available() -> bool:
 
 
 @with_retry(max_retries=2, base_delay=3.0)
-def call_llm(prompt: str, provider: str | None = None, max_tokens: int = 1500) -> str:
+def call_llm(
+    prompt: str,
+    provider: str | None = None,
+    max_tokens: int = 1500,
+    response_mime_type: str | None = None,
+    timeout: int | None = None,
+) -> str:
     """Call any supported LLM provider with the given prompt.
 
     Args:
@@ -93,7 +99,7 @@ def call_llm(prompt: str, provider: str | None = None, max_tokens: int = 1500) -
     elif provider == "claude_cli":
         return call_claude_cli(prompt, max_tokens=max_tokens)
     elif provider == "gemini":
-        return _call_gemini(prompt, max_tokens)
+        return _call_gemini(prompt, max_tokens, response_mime_type=response_mime_type, timeout=timeout)
     elif provider == "minimax":
         return _call_minimax(prompt, max_tokens)
     elif provider == "openai":
@@ -151,7 +157,12 @@ def _call_minimax(prompt: str, max_tokens: int) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
-def _call_gemini(prompt: str, max_tokens: int) -> str:
+def _call_gemini(
+    prompt: str,
+    max_tokens: int,
+    response_mime_type: str | None = None,
+    timeout: int | None = None,
+) -> str:
     """Call Gemini with a short fallback cascade for transient model capacity errors."""
     import time
     import requests
@@ -176,9 +187,11 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
                 "temperature": 0.7,
             },
         }
+        if response_mime_type:
+            body["generationConfig"]["responseMimeType"] = response_mime_type
         try:
             response = requests.post(
-                url, json=body, timeout=60,
+                url, json=body, timeout=timeout or 60,
                 headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             )
         except requests.RequestException as exc:
