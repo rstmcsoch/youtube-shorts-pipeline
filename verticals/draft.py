@@ -97,12 +97,14 @@ LIVE RESEARCH (use ONLY names/facts from here — never fabricate):
 {thumb_guidance}
 
 RULES:
-- Anti-hallucination: only use names, scores, events found in research above
+- Anti-hallucination: only use factual claims supported by the research above; do not invent facts, names, numbers, quotes, or events.
+- STRICT DYPOL PRIVACY/STYLE RULE: Do not include any personal names of real people anywhere in any output field. This applies to the narration script, YouTube title, YouTube description, tags, Instagram caption, TikTok caption, thumbnail prompt, and every b-roll prompt. Do not name public figures, executives, creators, politicians, researchers, or any other individual, even when their names appear in the topic or research. Refer to people only by role or generic description (for example, "the company's CEO", "a technology researcher", or "the platform's founder"). Company, product, organization, and place names are allowed when relevant; individual people's names are not.
+- Before returning JSON, review every field and remove personal names, including names embedded in quoted text, examples, hashtags, or thumbnail/on-screen-text instructions. If the topic cannot be covered accurately without a person's name, rewrite it as a general explanation rather than including the name.
 - Follow the TONE, PACING, and HOOK PATTERNS from the niche profile above
 - Pick the most appropriate hook pattern for this specific topic
 - Use one of the CTA OPTIONS at the end
 - Never use any of the NEVER USE phrases
-- B-roll prompts must follow the visual guidance (style, mood, preferred subjects)
+- B-roll prompts must follow the visual guidance (style, mood, preferred subjects), without personal names or recognizable depictions of named individuals
 
 Output JSON exactly:
 {{
