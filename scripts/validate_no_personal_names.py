@@ -33,7 +33,7 @@ def scan_text(text):
         # multiword phrase as a likely name when it contains at least two tokens
         # outside the common-English/technology vocabulary. This preserves
         # "Jane Doe" while avoiding title fragments such as "Agents Are Changing Video".
-        unknown_words = [word for word in words if re.sub(r"['''s$", "", word) not in ALLOWED]
+        unknown_words = [word for word in words if (word[:-2] if word.endswith(("'s", "\u2019s")) else word) not in ALLOWED]
         if len(unknown_words) < 2:
             continue
         hits.append(phrase)
