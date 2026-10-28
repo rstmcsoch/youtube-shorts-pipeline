@@ -1,0 +1,11 @@
+{
+  "job_id": "hark-anthropic-ipo-b4",
+  "producing_run_id": "40658156078",
+  "artifact_name": "draft-hark-anthropic-ipo-b4",
+  "draft_file": "1793176809.json",
+  "language": "en",
+  "title": "Anthropic Files For Biggest Tech IPO Ever (Ticker ANT)",
+  "topic": "Anthropic files for what could be the biggest tech IPO ever",
+  "review_required": false,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793176809_en/broll_manifest.json"
+}
