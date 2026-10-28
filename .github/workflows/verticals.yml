@@ -145,7 +145,8 @@ jobs:
             exit 1
           fi
           python -m verticals produce --draft "$DRAFT" --lang "$LANGUAGE" --voice edge
-          echo "Draft and media were produced. No YouTube upload was run in this job."
+          python scripts/validate_no_personal_names.py --draft "$DRAFT" --captions "$VERTICALS_HOME/media/verticals_${DYPOL_JOB_ID}_en.srt"
+          echo "No-personal-names gate passed; human review remains required. No YouTube upload was run."
 
       - name: Save durable handoff record
         env:
@@ -327,6 +328,13 @@ jobs:
             --tags "$TAGS_OVERRIDE" \
             --privacy "$PRIVACY" \
             --print-insert-body
+
+      - name: Block upload if reviewed text contains personal names
+        run: |
+          set -euo pipefail
+          CAPTIONS=()
+          while IFS= read -r -d '' FILE; do CAPTIONS+=(--captions "$FILE"); done < <(find "$VERTICALS_HOME/media" -type f \( -name '*.srt' -o -name '*.vtt' \) -print0)
+          python scripts/validate_no_personal_names.py --draft "$DRAFT" "${CAPTIONS[@]}"
 
       - name: Upload the reviewed video to YouTube
         env:
