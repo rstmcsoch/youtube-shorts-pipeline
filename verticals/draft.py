@@ -177,11 +177,15 @@ RULES:
 - Use one of the CTA OPTIONS at the end
 - Never use any of the NEVER USE phrases
 - B-roll prompts must follow the visual guidance (style, mood, preferred subjects), without personal names or recognizable depictions of named individuals
+- Emit 3 visual_intents aligned to the three b-roll prompts/script segments. Each intent must include type (news_event, product, concept, data, or transition), segment, entities (company/product/place only, never personal names), keywords, and real_image_essential (boolean). Use news_event/product only for a specific real-world event or identifiable product; concept/data/transition for general illustrations. Set real_image_essential=true only when the segment would be misleading without an authentic image.
 
 Output JSON exactly:
 {{
   "script": "...",
   "broll_prompts": ["prompt for frame 1", "prompt for frame 2", "prompt for frame 3"],
+  "visual_intents": [
+    {"type":"news_event|product|concept|data|transition","segment":"matching narration segment","entities":["company or product"],"keywords":["visual keywords"],"real_image_essential":false}
+  ],
   "youtube_title": "...",
   "youtube_description": "...",
   "youtube_tags": "tag1,tag2,tag3",
@@ -207,12 +211,38 @@ Output JSON exactly:
         else:
             draft["broll_prompts"] = [str(p) for p in draft["broll_prompts"][:3]]
 
+    # Normalize structured visual intents; legacy drafts receive safe concept intents.
+    allowed_types = {"news_event", "product", "concept", "data", "transition"}
+    raw_intents = draft.get("visual_intents")
+    intents = []
+    if isinstance(raw_intents, list):
+        for index, item in enumerate(raw_intents[:3]):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type", "concept")).strip().casefold()
+            if kind not in allowed_types:
+                kind = "concept"
+            entities = item.get("entities", [])
+            keywords = item.get("keywords", [])
+            intents.append({
+                "type": kind,
+                "segment": str(item.get("segment") or draft.get("broll_prompts", [""] * 3)[min(index, 2)]),
+                "entities": [str(v) for v in entities if isinstance(v, (str, int, float))][:8] if isinstance(entities, list) else [],
+                "keywords": [str(v) for v in keywords if isinstance(v, (str, int, float))][:12] if isinstance(keywords, list) else [],
+                "real_image_essential": bool(item.get("real_image_essential", False)),
+            })
+    prompts = draft.get("broll_prompts", ["Cinematic technology background"] * 3)
+    while len(intents) < min(3, len(prompts)):
+        i = len(intents)
+        intents.append({"type": "concept", "segment": str(prompts[i]), "entities": [],
+                        "keywords": [w for w in str(prompts[i]).split()[:10]],
+                        "real_image_essential": False})
+    draft["visual_intents"] = intents
+
     # Append visual prompt suffix to b-roll prompts
     suffix = get_visual_prompt_suffix(profile)
     if suffix and "broll_prompts" in draft:
-        draft["broll_prompts"] = [
-            f"{p}. {suffix}" for p in draft["broll_prompts"]
-        ]
+        draft["broll_prompts"] = [f"{p}. {suffix}" for p in draft["broll_prompts"]]
 
     draft["news"] = news
     draft["research"] = research
