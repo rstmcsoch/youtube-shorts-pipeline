@@ -11,7 +11,14 @@ def test_detects_person_name_in_script_and_title():
 
 def test_allows_common_technical_brands_and_generic_title():
     assert not scan_text("AI Video Agents Are Replacing Editors")
+    assert not scan_text("AI Agents Are Changing Video Editing Forever")
+    assert not scan_text("Agents Are Changing Video, Editing Forever")
     assert not scan_text("Google Gemini and YouTube Shorts are tools.")
+
+
+def test_still_blocks_real_person_names():
+    assert scan_text("Jane Doe explains how AI agents work.")
+    assert scan_text("The report was written by Jane Doe.")
 
 def test_checks_description_tags_and_thumbnail_text():
     draft = {
