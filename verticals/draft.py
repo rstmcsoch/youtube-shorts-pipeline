@@ -39,7 +39,7 @@ def _extract_json_object(raw: str) -> dict:
         if in_string:
             if escaped:
                 escaped = False
-            elif char == "\\\\":
+            elif char == "\\":
                 escaped = True
             elif char == '"':
                 in_string = False
