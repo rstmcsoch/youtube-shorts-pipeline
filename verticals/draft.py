@@ -6,6 +6,7 @@ visual vocabulary for b-roll prompts, and thumbnail guidance.
 """
 
 import json
+import re
 
 from .config import PLATFORM_CONFIGS
 from .llm import call_llm
@@ -17,6 +18,77 @@ from .research import research_topic
 def _call_claude(prompt: str) -> str:
     """Backwards-compatible Claude seam used by older tests and callers."""
     return call_llm(prompt, provider="claude")
+
+
+def _extract_json_object(raw: str) -> dict:
+    """Parse one JSON object, tolerating surrounding prose/fences but not truncation."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^\`\`\`(?:json)?\\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\\s*\`\`\`$", "", text)
+    start = text.find("{")
+    if start < 0:
+        raise json.JSONDecodeError("No JSON object found in model response", text, 0)
+
+    # Find the first balanced object while respecting quoted strings and escapes.
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                parsed = json.loads(text[start:index + 1])
+                if not isinstance(parsed, dict):
+                    raise json.JSONDecodeError("Expected a JSON object", text, start)
+                return parsed
+    raise json.JSONDecodeError("Incomplete or truncated JSON object", text, len(text))
+
+
+def _generate_json_response(prompt: str, provider: str | None) -> dict:
+    """Generate a draft JSON object, retrying once with a repair prompt on parse failure."""
+    def request(text: str) -> str:
+        if provider in (None, "claude"):
+            return call_llm(
+                text, provider=provider or "claude", max_tokens=8192,
+                response_mime_type="application/json", timeout=120,
+            )
+        return call_llm(
+            text, provider=provider, max_tokens=8192,
+            response_mime_type="application/json", timeout=120,
+        )
+
+    raw = request(prompt)
+    try:
+        return _extract_json_object(raw)
+    except (json.JSONDecodeError, TypeError) as first_error:
+        log(f"Draft JSON parse failed; requesting one clean JSON retry ({first_error}).")
+        repair_prompt = (
+            prompt
+            + "\\n\\nRETRY REQUIREMENT: Your previous response was invalid or truncated. "
+              "Return one complete, valid JSON object only, with every string properly escaped. "
+              "Do not use markdown fences or any text before or after the JSON object."
+        )
+        raw = request(repair_prompt)
+        try:
+            return _extract_json_object(raw)
+        except (json.JSONDecodeError, TypeError) as second_error:
+            raise ValueError(
+                "Draft model returned invalid JSON after one retry; no draft was approved."
+            ) from second_error
 
 
 def generate_draft(
@@ -118,25 +190,7 @@ Output JSON exactly:
   "thumbnail_prompt": "..."
 }}"""
 
-    if provider in (None, "claude"):
-        raw = _call_claude(prompt)
-    else:
-        raw = call_llm(prompt, provider=provider)
-
-    # Parse JSON from response
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-
-    # Handle case where LLM wraps in additional text
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start >= 0 and end > start:
-        raw = raw[start:end]
-
-    draft = json.loads(raw)
+    draft = _generate_json_response(prompt, provider)
 
     # Validate and sanitize LLM output fields
     expected_str_fields = [
