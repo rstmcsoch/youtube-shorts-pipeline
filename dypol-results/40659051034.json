@@ -1,0 +1,22 @@
+{
+  "job_id": "hark-anthropic-ipo-b4",
+  "run_id": "40659051034",
+  "producing_run_id": "40658156078",
+  "draft_source": "durable-snapshot",
+  "status": "uploaded",
+  "visibility": "private",
+  "youtube_id": "yY3jfkbZahs",
+  "youtube_url": "https://youtu.be/yY3jfkbZahs",
+  "title": "Anthropic Files For Biggest Tech IPO Ever (Ticker ANT)",
+  "video_count": 1,
+  "videos": [
+    {
+      "kind": "short",
+      "youtube_id": "yY3jfkbZahs",
+      "youtube_url": "https://youtu.be/yY3jfkbZahs",
+      "title": "Anthropic Files For Biggest Tech IPO Ever (Ticker ANT)",
+      "visibility": "private"
+    }
+  ],
+  "recorded_at": "2026-10-28T08:47:46.409800+00:00"
+}
