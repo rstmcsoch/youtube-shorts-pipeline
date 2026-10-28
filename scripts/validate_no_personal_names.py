@@ -16,7 +16,7 @@ ALLOWED = {
     "Intelligence", "Machine", "Learning", "Generative", "Autonomous",
     "Cinematic", "Minimalist", "Photorealistic", "Electric", "Blue", "Dark",
     "Moody", "High", "Detail", "Shallow", "Future", "Work", "Replacing",
-    "Editors", "Agents", "Explained", "Breaking", "Watch", "Discover", "Are", "Is", "By", "For", "And", "Of", "With", "From", "On", "In", "To", "At", "As", "Over"
+    "Editors", "Agents", "Explained", "Breaking", "Watch", "Discover", "Changing", "Editing", "Forever", "Are", "Is", "By", "For", "And", "Of", "With", "From", "On", "In", "To", "At", "As", "Over"
 }
 NAME_RUN = re.compile(r"\b[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?){1,3}\b")
 NAME_HINT = re.compile(r"\b(?:Elon|Sundar|Satya|Jensen|Demis|Dario|Sam Altman|Mark Zuckerberg|Bill Gates|Steve Jobs|Tim Cook)\b", re.I)
