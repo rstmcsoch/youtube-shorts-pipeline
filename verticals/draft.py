@@ -24,8 +24,8 @@ def _extract_json_object(raw: str) -> dict:
     """Parse one JSON object, tolerating surrounding prose/fences but not truncation."""
     text = raw.strip()
     if text.startswith("```"):
-        text = re.sub(r"^\`\`\`(?:json)?\\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\\s*\`\`\`$", "", text)
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
     start = text.find("{")
     if start < 0:
         raise json.JSONDecodeError("No JSON object found in model response", text, 0)
@@ -78,7 +78,7 @@ def _generate_json_response(prompt: str, provider: str | None) -> dict:
         log(f"Draft JSON parse failed; requesting one clean JSON retry ({first_error}).")
         repair_prompt = (
             prompt
-            + "\\n\\nRETRY REQUIREMENT: Your previous response was invalid or truncated. "
+            + "\n\nRETRY REQUIREMENT: Your previous response was invalid or truncated. "
               "Return one complete, valid JSON object only, with every string properly escaped. "
               "Do not use markdown fences or any text before or after the JSON object."
         )
