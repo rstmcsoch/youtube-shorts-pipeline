@@ -1,0 +1,22 @@
+{
+  "job_id": "job-mvrpptqt-so63hi",
+  "run_id": "40642921452",
+  "producing_run_id": "40641949031",
+  "draft_source": "durable-snapshot",
+  "status": "uploaded",
+  "visibility": "private",
+  "youtube_id": "MjBQuZvl9oc",
+  "youtube_url": "https://youtu.be/MjBQuZvl9oc",
+  "title": "How AI Agents Are Killing Traditional Video Editing",
+  "video_count": 1,
+  "videos": [
+    {
+      "kind": "short",
+      "youtube_id": "MjBQuZvl9oc",
+      "youtube_url": "https://youtu.be/MjBQuZvl9oc",
+      "title": "How AI Agents Are Killing Traditional Video Editing",
+      "visibility": "private"
+    }
+  ],
+  "recorded_at": "2026-10-28T06:19:28.563946+00:00"
+}
