@@ -100,8 +100,26 @@ def cmd_produce(args):
 
     # B-roll
     if force or not state.is_done("broll"):
-        frames = generate_broll(draft.get("broll_prompts", ["Cinematic landscape"] * 3), work_dir)
-        state.complete_stage("broll", {"frames": [str(f) for f in frames]})
+        frames = generate_broll(
+            draft.get("broll_prompts", ["Cinematic landscape"] * 3),
+            work_dir,
+            visual_intents=draft.get("visual_intents", []),
+        )
+        manifest_path = work_dir / "broll_manifest.json"
+        visual_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        credits = visual_manifest.get("credits", "")
+        if credits:
+            description = draft.get("youtube_description", "")
+            if credits not in description:
+                draft["youtube_description"] = (description.rstrip() + "\\n\\n" + credits).strip()
+        draft["review_required"] = bool(draft.get("review_required", False) or visual_manifest.get("review_required", False))
+        draft["broll_manifest"] = str(manifest_path)
+        draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
+        state.complete_stage("broll", {
+            "frames": [str(f) for f in frames],
+            "manifest": str(manifest_path),
+            "review_required": draft["review_required"],
+        })
     else:
         log("Skipping b-roll (already done)")
         frames = [Path(f) for f in state.get_artifact("broll", "frames", [])]
