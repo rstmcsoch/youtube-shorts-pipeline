@@ -177,12 +177,13 @@ RULES:
 - Use one of the CTA OPTIONS at the end
 - Never use any of the NEVER USE phrases
 - B-roll prompts must follow the visual guidance (style, mood, preferred subjects), without personal names or recognizable depictions of named individuals
-- Emit 3 visual_intents aligned to the three b-roll prompts/script segments. Each intent must include type (news_event, product, concept, data, or transition), segment, entities (company/product/place only, never personal names), keywords, and real_image_essential (boolean). Use news_event/product only for a specific real-world event or identifiable product; concept/data/transition for general illustrations. Set real_image_essential=true only when the segment would be misleading without an authentic image.
+- Emit exactly 8 broll_prompts and 8 matching visual_intents, one per ~8 seconds of narration, in script order. Each b-roll prompt must describe a concrete, photographable scene or object (hardware, people's hands at work, server rooms, city at night, security operations room) and must NEVER show screens with code, readable text, numbers, labels, logos, or user interfaces.
+- Each visual intent Each intent must include type (news_event, product, concept, data, or transition), segment, entities (company/product/place only, never personal names), keywords, and real_image_essential (boolean). Use news_event/product only for a specific real-world event or identifiable product; concept/data/transition for general illustrations. Set real_image_essential=true only when the segment would be misleading without an authentic image.
 
 Output JSON exactly:
 {{
   "script": "...",
-  "broll_prompts": ["prompt for frame 1", "prompt for frame 2", "prompt for frame 3"],
+  "broll_prompts": ["prompt for frame 1", "prompt for frame 2", "prompt for frame 3", "prompt for frame 4", "prompt for frame 5", "prompt for frame 6", "prompt for frame 7", "prompt for frame 8"],
   "visual_intents": [
     {{"type":"news_event|product|concept|data|transition","segment":"matching narration segment","entities":["company or product"],"keywords":["visual keywords"],"real_image_essential":false}}
   ],
@@ -207,16 +208,16 @@ Output JSON exactly:
             draft[field] = str(draft[field])
     if "broll_prompts" in draft:
         if not isinstance(draft["broll_prompts"], list):
-            draft["broll_prompts"] = ["Cinematic landscape"] * 3
+            draft["broll_prompts"] = ["Cinematic landscape"] * 8
         else:
-            draft["broll_prompts"] = [str(p) for p in draft["broll_prompts"][:3]]
+            draft["broll_prompts"] = [str(p) for p in draft["broll_prompts"][:8]]
 
     # Normalize structured visual intents; legacy drafts receive safe concept intents.
     allowed_types = {"news_event", "product", "concept", "data", "transition"}
     raw_intents = draft.get("visual_intents")
     intents = []
     if isinstance(raw_intents, list):
-        for index, item in enumerate(raw_intents[:3]):
+        for index, item in enumerate(raw_intents[:8]):
             if not isinstance(item, dict):
                 continue
             kind = str(item.get("type", "concept")).strip().casefold()
@@ -226,13 +227,13 @@ Output JSON exactly:
             keywords = item.get("keywords", [])
             intents.append({
                 "type": kind,
-                "segment": str(item.get("segment") or draft.get("broll_prompts", [""] * 3)[min(index, 2)]),
+                "segment": str(item.get("segment") or draft.get("broll_prompts", [""] * 8)[min(index, 7)]),
                 "entities": [str(v) for v in entities if isinstance(v, (str, int, float))][:8] if isinstance(entities, list) else [],
                 "keywords": [str(v) for v in keywords if isinstance(v, (str, int, float))][:12] if isinstance(keywords, list) else [],
                 "real_image_essential": bool(item.get("real_image_essential", False)),
             })
-    prompts = draft.get("broll_prompts", ["Cinematic technology background"] * 3)
-    while len(intents) < min(3, len(prompts)):
+    prompts = draft.get("broll_prompts", ["Cinematic technology background"] * 8)
+    while len(intents) < min(8, len(prompts)):
         i = len(intents)
         intents.append({"type": "concept", "segment": str(prompts[i]), "entities": [],
                         "keywords": [w for w in str(prompts[i]).split()[:10]],

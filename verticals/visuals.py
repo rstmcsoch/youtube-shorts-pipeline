@@ -157,7 +157,7 @@ def _cloudflare_generate(prompt, output_path):
     url = f"https://api.cloudflare.com/client/v4/accounts/{quote(account, safe='')}/ai/run/@cf/black-forest-labs/flux-1-schnell"
     try:
         response = requests.post(url, headers={"Authorization": f"Bearer {token}"},
-                                 json={"prompt": f"Vertical 9:16 editorial illustration, no text, no watermark: {prompt}"},
+                                 json={"prompt": f"Vertical 9:16 cinematic photo, absolutely no text, no letters, no numbers, no words, no screens with writing, no logos, no watermark: {prompt}"},
                                  timeout=(8, 60))
         if response.status_code == 429:
             return None

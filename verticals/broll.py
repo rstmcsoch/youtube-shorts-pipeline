@@ -135,7 +135,7 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    prompt_list = list(prompts or [])[:3] or ["Cinematic technology background"]
+    prompt_list = list(prompts or [])[:8] or ["Cinematic technology background"]
     intents = list(visual_intents or [])
     while len(intents) < len(prompt_list):
         prompt = str(prompt_list[len(intents)])
@@ -264,6 +264,12 @@ def animate_frame(img_path: Path, out_path: Path, duration: float, effect: str =
         vf = (
             f"scale={int(w * 1.15)}:{int(h * 1.15)},"
             f"zoompan=z=1.15:x='0.15*iw*on/{frames}':y='ih*0.075'"
+            f":d={frames}:s={w}x{h}:fps={fps}"
+        )
+    elif effect == "pan_left":
+        vf = (
+            f"scale={int(w * 1.15)}:{int(h * 1.15)},"
+            f"zoompan=z=1.15:x='0.15*iw-0.15*iw*on/{frames}':y='ih*0.075'"
             f":d={frames}:s={w}x{h}:fps={fps}"
         )
     else:  # zoom_out
