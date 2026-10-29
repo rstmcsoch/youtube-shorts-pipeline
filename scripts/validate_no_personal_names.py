@@ -23,20 +23,32 @@ ALLOWED |= {"Associated", "Press", "Wall", "Street", "Nasdaq", "Claude", "Broadc
 NAME_RUN = re.compile(r"\b[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?){1,3}\b")
 NAME_HINT = re.compile(r"\b(?:Elon|Sundar|Satya|Jensen|Demis|Dario|Sam Altman|Mark Zuckerberg|Bill Gates|Steve Jobs|Tim Cook)\b", re.I)
 
+_NAMES_FILE = Path(__file__).with_name("given_names.txt")
+GIVEN_NAMES = {n.strip() for n in _NAMES_FILE.read_text(encoding="utf-8").splitlines() if n.strip()} if _NAMES_FILE.exists() else set()
+
+
+def _bare(word):
+    return word[:-2] if word.endswith(("'s", "\u2019s")) else word
+
+
 def scan_text(text):
+    """Flag likely personal names.
+
+    A capitalised run counts as a name only when it contains a known given name
+    (not a brand/allowed word) followed by another capitalised word outside the
+    allowlist, e.g. "Jane Doe". Ordinary title-case phrases such as
+    "Artificial Analysis Intelligence Index" or "Carbon Changes Cybersecurity
+    Forever" no longer trip the gate. Explicit public-figure hints always block.
+    """
     text = str(text)
     hits = []
     for match in NAME_RUN.finditer(text):
-        phrase = match.group(0)
-        words = phrase.split()
-        # Headline/title case is common for ordinary English words. Only treat a
-        # multiword phrase as a likely name when it contains at least two tokens
-        # outside the common-English/technology vocabulary. This preserves
-        # "Jane Doe" while avoiding title fragments such as "Agents Are Changing Video".
-        unknown_words = [word for word in words if (word[:-2] if word.endswith(("'s", "\u2019s")) else word) not in ALLOWED]
-        if len(unknown_words) < 2:
-            continue
-        hits.append(phrase)
+        words = [_bare(w) for w in match.group(0).split()]
+        for first, second in zip(words, words[1:]):
+            if (first not in ALLOWED and first.lower() in GIVEN_NAMES
+                    and second not in ALLOWED):
+                hits.append(match.group(0))
+                break
     hits.extend(match.group(0) for match in NAME_HINT.finditer(text))
     return sorted(set(hits), key=str.casefold)
 

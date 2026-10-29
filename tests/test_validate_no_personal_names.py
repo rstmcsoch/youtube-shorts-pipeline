@@ -55,3 +55,9 @@ def test_checks_caption_files_and_blocks_cli(tmp_path):
 
 def test_missing_caption_fails_closed(tmp_path):
     assert any("missing" in issue for issue in validate_draft({}, [tmp_path / "missing.srt"]))
+
+
+def test_allows_title_case_news_phrases():
+    assert not scan_text("It topped the Artificial Analysis Intelligence Index v5.0.")
+    assert not scan_text("Gemini 4 Carbon Changes Cybersecurity Forever")
+    assert not scan_text("Google DeepMind Launches Gemini 4 Carbon")
