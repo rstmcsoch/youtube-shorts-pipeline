@@ -1,0 +1,22 @@
+{
+  "job_id": "job-mvtixw90-b75ykp",
+  "run_id": "40882834253",
+  "producing_run_id": "40874211901",
+  "draft_source": "durable-snapshot",
+  "status": "uploaded",
+  "visibility": "unlisted",
+  "youtube_id": "asuoIGvd4hQ",
+  "youtube_url": "https://youtu.be/asuoIGvd4hQ",
+  "title": "How AI helps security teams spot threats faster",
+  "video_count": 1,
+  "videos": [
+    {
+      "kind": "short",
+      "youtube_id": "asuoIGvd4hQ",
+      "youtube_url": "https://youtu.be/asuoIGvd4hQ",
+      "title": "How AI helps security teams spot threats faster",
+      "visibility": "unlisted"
+    }
+  ],
+  "recorded_at": "2026-10-29T13:34:29.551977+00:00"
+}
