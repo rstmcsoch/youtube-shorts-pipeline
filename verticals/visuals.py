@@ -80,9 +80,54 @@ def off_topic_subject(candidate, intent):
     return not (hits & about)
 
 
+# A tech-niche stock hit must show something technological. Generic words such as
+# "defense" or "silhouette" matched an aikido photo and a sunset in field tests.
+TECH_ANCHORS = {
+    "computer", "computers", "server", "servers", "network", "networks", "data", "datacenter",
+    "code", "coding", "programming", "programmer", "software", "hardware", "cyber", "cybersecurity",
+    "security", "hacker", "hacking", "technology", "tech", "digital", "chip", "chips", "processor",
+    "cpu", "gpu", "circuit", "electronics", "electronic", "laptop", "keyboard", "monitor", "screen",
+    "internet", "cable", "cables", "fiber", "optic", "robot", "robotics", "artificial", "intelligence",
+    "ai", "algorithm", "cloud", "smartphone", "phone", "device", "devices", "office", "control",
+    "binary", "matrix", "router", "switch", "lock", "padlock", "encryption", "firewall", "virus",
+    "malware", "password", "online", "web", "website", "app", "dashboard", "analytics", "machine",
+    "automation", "engineer", "engineering", "semiconductor", "silicon", "microchip", "motherboard",
+}
+
+
+def tech_anchored(candidate):
+    return bool(_norm_tokens(candidate.get("title", "")) & TECH_ANCHORS)
+
+
 def stock_candidate_ok(candidate, intent):
-    """Relevance gate for Pixabay stills/videos: topical tag overlap, no off-topic subjects."""
-    return bool(tag_overlap(candidate, intent)) and not off_topic_subject(candidate, intent)
+    """Relevance gate for Pixabay stills/videos: topical tag overlap, a visible
+    technology subject (tech niche), and no off-topic subjects."""
+    if not tag_overlap(candidate, intent) or off_topic_subject(candidate, intent):
+        return False
+    if (intent.get("niche") or "tech") == "tech" and not tech_anchored(candidate):
+        return False
+    return True
+
+
+def mean_luma(path, video=False):
+    """Average brightness 0-255 of an image or (sampled) video; None if unknown."""
+    import subprocess
+    try:
+        args = ["ffmpeg", "-v", "error", "-i", str(path)]
+        args += ["-vf", "fps=2,scale=64:-2,format=gray", "-f", "rawvideo", "-"] if video else \
+                ["-vf", "scale=64:-2,format=gray", "-frames:v", "1", "-f", "rawvideo", "-"]
+        out = subprocess.run(args, capture_output=True, timeout=60).stdout
+        return (sum(out) / len(out)) if out else None
+    except Exception:
+        return None
+
+
+MIN_LUMA = float(__import__("os").environ.get("MIN_VISUAL_LUMA", "38"))
+
+
+def too_dark(path, video=False):
+    value = mean_luma(path, video=video)
+    return value is not None and value < MIN_LUMA
 
 
 def relevance_score(candidate, intent, target=(9, 16)):
@@ -310,6 +355,9 @@ def select_visual(intent, output_path, used_hashes=None):
                     continue
             try:
                 metadata = _download_candidate(candidate, output_path)
+                if too_dark(output_path):
+                    output_path.unlink(missing_ok=True)
+                    continue
                 digest = metadata["sha256"]
                 if digest in used_hashes:
                     output_path.unlink(missing_ok=True)
@@ -465,6 +513,8 @@ def select_video_clip(intent, out_path, used_ids=None):
                             raise ValueError("clip download too large")
                         f.write(chunk)
             clip_seconds = normalize_clip(raw, out_path)
+            if too_dark(out_path, video=True):
+                raise ValueError("clip too dark")
             used_ids.add(candidate["asset_id"])
             meta = {k: candidate[k] for k in ("provider", "source_url", "asset_id", "license", "license_url",
                                                 "rendition", "query")}

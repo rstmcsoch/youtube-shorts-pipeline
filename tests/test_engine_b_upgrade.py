@@ -457,3 +457,25 @@ class TestAudio:
         assert -24 <= r["gain_db"] <= -20
         rec = json.loads((work / "broll_manifest.json").read_text())["audio"]["music"]
         assert rec["license"] == "Pixabay Content License" and rec["attribution_required"] is False
+
+
+class TestTechAnchorAndDarkness:
+    def test_aikido_and_sunset_rejected(self):
+        from verticals.visuals import stock_candidate_ok
+        intent = {"keywords": ["cyber defense", "servers"], "entities": []}
+        assert not stock_candidate_ok({"title": "aikido, hakama, self defense, japan"}, intent)
+        intent2 = {"keywords": ["analyst silhouette", "monitoring"], "entities": []}
+        assert not stock_candidate_ok({"title": "sunset, grass, silhouette, horizon"}, intent2)
+
+    def test_tech_hit_accepted(self):
+        from verticals.visuals import stock_candidate_ok
+        intent = {"keywords": ["servers", "cyber defense"], "entities": []}
+        assert stock_candidate_ok({"title": "server, data center, network, servers"}, intent)
+
+    def test_dark_image_detected(self, tmp_path):
+        import subprocess
+        from verticals.visuals import too_dark
+        black = tmp_path / "b.png"; grey = tmp_path / "g.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x114", "-frames:v", "1", str(black)], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=64x114", "-frames:v", "1", str(grey)], check=True)
+        assert too_dark(black) and not too_dark(grey)
