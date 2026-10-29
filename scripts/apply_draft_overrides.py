@@ -70,8 +70,19 @@ def insert_body_preview(draft: dict) -> dict:
         "status": {
             "privacyStatus": meta.get("privacy", "private"),
             "selfDeclaredMadeForKids": False,
+            "containsSyntheticMedia": _contains_synthetic_media(draft),
         },
     }
+
+
+def _contains_synthetic_media(draft: dict) -> bool:
+    """Preview the same containsSyntheticMedia value the uploader will send."""
+    import os
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from verticals.synthetic_media import resolve_contains_synthetic_media
+    home = Path(os.environ.get("VERTICALS_HOME", str(Path.home() / ".verticals"))).expanduser()
+    lang = str(draft.get("lang") or draft.get("language") or "en")
+    return resolve_contains_synthetic_media(draft, lang, home / "media")
 
 
 def main() -> int:

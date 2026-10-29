@@ -77,6 +77,8 @@ def _apply_visual_manifest(draft, draft_path, manifest_path):
         draft["youtube_description"] = ("\n".join(lines).rstrip() + "\n\n" + credits).strip()
     draft["review_required"] = bool(draft.get("review_required", False) or visual_manifest.get("review_required", False))
     draft["broll_manifest"] = str(manifest_path)
+    from .synthetic_media import manifest_has_ai_asset
+    draft["contains_ai_visuals"] = manifest_has_ai_asset(visual_manifest)
     draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
