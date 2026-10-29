@@ -1,0 +1,11 @@
+{
+  "job_id": "job-mvtimgwq-hotblu",
+  "producing_run_id": "40872981820",
+  "artifact_name": "draft-job-mvtimgwq-hotblu",
+  "draft_file": "1793276772.json",
+  "language": "en",
+  "title": "Why AI Security Agents Still Need Humans",
+  "topic": "Why AI security agents need human oversight",
+  "review_required": false,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793276772_en/broll_manifest.json"
+}
