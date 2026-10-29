@@ -116,8 +116,8 @@ voice:
 captions:
   highlight_color: "#00FF88"
   text_color: "#FFFFFF"
-  font_family: "Arial"
-  font_size: 72
+  font_family: "Montserrat"
+  font_size: 92
   font_weight: "bold"
   position: "lower_third"
   background: "semi_transparent_dark"

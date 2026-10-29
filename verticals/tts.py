@@ -1,6 +1,10 @@
-"""Multi-provider TTS — Edge TTS (free default), ElevenLabs (premium), MiniMax, 60db (Indic + low cost), macOS say (fallback).
+"""Multi-provider TTS — Kokoro-82M (free, local, default for English), Edge TTS (free fallback), ElevenLabs (premium), MiniMax, 60db (Indic + low cost), macOS say (fallback).
 
-Edge TTS is the recommended default: free, cross-platform, 300+ voices, no API key.
+Kokoro-82M (Apache 2.0) runs locally on CPU through the lightweight
+`kokoro-onnx` package; model + voice files come from the official kokoro-onnx
+GitHub release and are cached. It is used for English; any failure falls back
+to Edge TTS.
+Edge TTS: free, cross-platform, 300+ voices, no API key.
 ElevenLabs is premium: most natural, requires API key.
 MiniMax is an alternative paid provider with streaming TTS.
 60db is an alternative paid provider with native Indic-language voices and a lower per-character cost.
@@ -23,6 +27,160 @@ from .config import (
 )
 from .log import log
 from .retry import with_retry
+
+
+# ─────────────────────────────────────────────────────
+# Kokoro-82M (Apache 2.0) via kokoro-onnx — free, local CPU
+# ─────────────────────────────────────────────────────
+
+KOKORO_RELEASE_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+KOKORO_MODEL_FILE = "kokoro-v1.0.onnx"
+KOKORO_VOICES_FILE = "voices-v1.0.bin"
+# sha256 of the official release files (verified 2026-10-29).
+KOKORO_SHA256 = {
+    "kokoro-v1.0.onnx": "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+    "kokoro-v1.0.int8.onnx": "6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb",
+    "voices-v1.0.bin": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+}
+# One consistent brand voice. af_heart is the highest-graded Kokoro voice.
+KOKORO_DEFAULT_VOICE = "af_heart"
+KOKORO_DEFAULT_SPEED = 1.08
+# Kokoro is only used for languages whose voice matches the brand voice.
+KOKORO_LANGS = {"en": "en-us"}
+
+
+VO_MIN_SECONDS = 45.0
+VO_MAX_SECONDS = 75.0
+
+
+def speed_for_target(seconds: float, speed: float, lo: float = VO_MIN_SECONDS, hi: float = VO_MAX_SECONDS):
+    """Speed that brings `seconds` into [lo, hi] (aiming 2 s inside), or None.
+
+    Returns None when already in range or when the needed change would push
+    speed outside 0.95-1.2 (then the script itself is the problem).
+    """
+    if lo <= seconds <= hi or seconds <= 0:
+        return None
+    target = lo + 2.0 if seconds < lo else hi - 2.0
+    new_speed = round(speed * seconds / target, 3)
+    if 0.95 <= new_speed <= 1.2:
+        return new_speed
+    return None
+
+
+def kokoro_model_dir() -> Path:
+    default = Path.home() / ".cache" / "kokoro-onnx"
+    return Path(os.environ.get("KOKORO_MODEL_DIR", str(default))).expanduser()
+
+
+def kokoro_settings() -> dict:
+    """Resolve the Kokoro voice/speed from env, clamped to a sane range."""
+    voice = (os.environ.get("KOKORO_VOICE", "") or KOKORO_DEFAULT_VOICE).strip()
+    try:
+        speed = float(os.environ.get("KOKORO_SPEED", "") or KOKORO_DEFAULT_SPEED)
+    except ValueError:
+        speed = KOKORO_DEFAULT_SPEED
+    speed = min(1.3, max(0.8, speed))
+    model = (os.environ.get("KOKORO_MODEL_FILE", "") or KOKORO_MODEL_FILE).strip()
+    return {"voice": voice, "speed": speed, "model_file": model}
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ensure_kokoro_files(model_file: str = KOKORO_MODEL_FILE) -> tuple[Path, Path]:
+    """Return (model, voices) paths, downloading from the official release if missing."""
+    model_dir = kokoro_model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for name in (model_file, KOKORO_VOICES_FILE):
+        path = model_dir / name
+        if not path.exists() or path.stat().st_size == 0:
+            if os.environ.get("KOKORO_AUTO_DOWNLOAD", "1").strip() != "1":
+                raise RuntimeError(f"Kokoro file missing: {path}")
+            log(f"Downloading Kokoro file {name}...")
+            tmp = path.with_suffix(path.suffix + ".part")
+            with requests.get(f"{KOKORO_RELEASE_BASE}/{name}", stream=True, timeout=(10, 120)) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+            tmp.replace(path)
+        expected = KOKORO_SHA256.get(name)
+        if expected and _sha256_file(path) != expected:
+            path.unlink(missing_ok=True)
+            raise RuntimeError(f"Kokoro file checksum mismatch: {name}")
+        paths.append(path)
+    return paths[0], paths[1]
+
+
+def _write_wav(samples, sample_rate: int, out_path: Path) -> None:
+    """Write float samples [-1, 1] as 16-bit mono PCM WAV (stdlib only)."""
+    import wave
+    import numpy as np
+    pcm = (np.clip(np.asarray(samples, dtype="float32"), -1.0, 1.0) * 32767.0).astype("<i2")
+    with wave.open(str(out_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm.tobytes())
+
+
+def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
+    """Generate voiceover locally with Kokoro-82M (kokoro-onnx, CPU)."""
+    kokoro_lang = KOKORO_LANGS.get(lang[:2])
+    if not kokoro_lang:
+        raise RuntimeError(f"Kokoro brand voice not configured for language '{lang}'")
+    if not str(script or "").strip():
+        raise RuntimeError("Kokoro received an empty script")
+    from kokoro_onnx import Kokoro
+
+    cfg = kokoro_settings()
+    model_path, voices_path = ensure_kokoro_files(cfg["model_file"])
+    log(f"Generating {lang} voiceover via Kokoro-82M (voice: {cfg['voice']}, speed: {cfg['speed']})...")
+    engine = Kokoro(str(model_path), str(voices_path))
+    samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=cfg["speed"], lang=kokoro_lang)
+    # Keep the voiceover inside the 45-75 s window when a small speed change can
+    # do it (one re-render at most, speed stays within 0.95-1.2).
+    if samples is not None and len(samples):
+        seconds = len(samples) / float(sample_rate)
+        new_speed = speed_for_target(seconds, cfg["speed"])
+        if new_speed is not None:
+            log(f"Kokoro voiceover {seconds:.1f}s outside {VO_MIN_SECONDS}-{VO_MAX_SECONDS}s; re-rendering at speed {new_speed}")
+            samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=new_speed, lang=kokoro_lang)
+            cfg["speed"] = new_speed
+    if samples is None or len(samples) < int(sample_rate) * 0.5:
+        raise RuntimeError("Kokoro produced no usable audio")
+    # Sanity check: spoken duration must roughly match the text length
+    # (~1.2-4.5 words per second). Catches silent / truncated renders.
+    words = max(1, len(str(script).split()))
+    seconds = len(samples) / float(sample_rate)
+    wps = words / seconds
+    if not (1.2 <= wps <= 4.5):
+        raise RuntimeError(f"Kokoro audio duration implausible ({seconds:.1f}s for {words} words)")
+    out_path = out_dir / f"voiceover_{lang}.wav"
+    _write_wav(samples, sample_rate, out_path)
+    _write_voice_meta(out_dir, "kokoro", cfg["voice"], cfg["speed"], cfg["model_file"])
+    log(f"Kokoro voiceover saved: {out_path.name} ({seconds:.1f}s, {wps:.2f} words/s)")
+    return out_path
+
+
+def _write_voice_meta(out_dir: Path, provider: str, voice: str, speed=None, model: str = "") -> None:
+    """Record which TTS provider/voice actually produced the voiceover."""
+    import json
+    try:
+        (Path(out_dir) / "voiceover_meta.json").write_text(json.dumps({
+            "provider": provider, "voice": voice, "speed": speed, "model": model,
+            "license": "Apache-2.0 (Kokoro-82M)" if provider == "kokoro" else "",
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 # ─────────────────────────────────────────────────────
@@ -75,6 +233,7 @@ def _generate_edge_tts(script: str, out_dir: Path, lang: str, voice_override: st
             asyncio.run(_edge_tts_generate(script, voice, out_path))
 
         log(f"Edge TTS voiceover saved: {out_path.name}")
+        _write_voice_meta(out_dir, "edge", voice)
         return out_path
     except Exception as e:
         raise RuntimeError(f"Edge TTS failed: {e}")
@@ -315,7 +474,7 @@ def get_tts_provider(name: str | None = None) -> str:
     """Resolve which TTS provider to use.
 
     Priority: explicit name > TTS_PROVIDER env > auto-detect.
-    Auto-detect tries: edge_tts > minimax > elevenlabs > 60db > say.
+    Auto-detect tries: kokoro > edge_tts > minimax > elevenlabs > 60db > say.
     """
     if name and name != "auto":
         return name.lower()
@@ -329,7 +488,12 @@ def get_tts_provider(name: str | None = None) -> str:
     if from_cfg:
         return from_cfg
 
-    # Auto-detect: Edge TTS first (free, cross-platform)
+    # Auto-detect: Kokoro first (free, local), then Edge TTS
+    try:
+        import kokoro_onnx  # noqa: F401
+        return "kokoro"
+    except ImportError:
+        pass
     try:
         import edge_tts  # noqa: F401
         return "edge"
@@ -381,8 +545,20 @@ def generate_voiceover(
     provider = get_tts_provider(provider)
     voice_config = voice_config or {}
 
+    if provider == "kokoro":
+        if lang[:2] in KOKORO_LANGS:
+            try:
+                return _generate_kokoro(script, out_dir, lang)
+            except Exception as e:
+                log(f"Kokoro TTS failed: {e}; falling back to Edge TTS")
+        else:
+            log(f"Kokoro brand voice is English-only; using Edge TTS for {lang}")
+        provider = "edge"
+
     if provider == "edge":
-        voice_override = voice_config.get("voice_id", "")
+        voice_override = str(voice_config.get("voice_id", "") or "")
+        if voice_override and "Neural" not in voice_override:
+            voice_override = ""  # not an Edge voice name (e.g. a Kokoro/other id)
         try:
             return _generate_edge_tts(script, out_dir, lang, voice_override)
         except Exception as e:

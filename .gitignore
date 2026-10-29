@@ -28,3 +28,4 @@ venv/
 .DS_Store
 Thumbs.db
 uv.lock
+.kokoro-cache/

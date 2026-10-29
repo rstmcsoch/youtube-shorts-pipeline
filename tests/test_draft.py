@@ -87,3 +87,42 @@ class TestGenerateDraft:
 
         draft = generate_draft("Test")
         assert len(draft["broll_prompts"]) == 8  # truncated to 8
+
+
+class TestHookAndLength:
+    @patch("verticals.draft.research_topic")
+    @patch("verticals.draft.call_llm")
+    def test_prompt_requires_punchy_hook_and_length(self, mock_llm, mock_research):
+        mock_research.return_value = "research"
+        mock_llm.return_value = json.dumps({"script": "s", "broll_prompts": ["p"]})
+        generate_draft("Test")
+        prompt = mock_llm.call_args[0][0]
+        assert "HOOK (first ~1.5 seconds)" in prompt
+        assert "45 and 75 seconds" in prompt
+
+    @patch("verticals.draft.research_topic")
+    @patch("verticals.draft.call_llm")
+    def test_short_script_gets_one_rewrite(self, mock_llm, mock_research):
+        mock_research.return_value = "research"
+        short = json.dumps({"script": " ".join(["word"] * 80), "broll_prompts": ["p"]})
+        good = json.dumps({"script": " ".join(["word"] * 140), "broll_prompts": ["p"]})
+        mock_llm.side_effect = [short, good]
+        draft = generate_draft("Test")
+        assert len(draft["script"].split()) == 140
+        assert "LENGTH CORRECTION" in mock_llm.call_args[0][0]
+
+    @patch("verticals.draft.research_topic")
+    @patch("verticals.draft.call_llm")
+    def test_failed_rewrite_keeps_original(self, mock_llm, mock_research):
+        mock_research.return_value = "research"
+        long = json.dumps({"script": " ".join(["word"] * 250), "broll_prompts": ["p"]})
+        mock_llm.side_effect = [long, RuntimeError("quota")]
+        draft = generate_draft("Test")
+        assert len(draft["script"].split()) == 250
+
+    def test_length_bounds(self):
+        from verticals.draft import script_length_problem
+        assert script_length_problem("word " * 140) == ""
+        assert script_length_problem("word " * 90) == "short"
+        assert script_length_problem("word " * 200) == "long"
+        assert script_length_problem("tiny stub") == ""

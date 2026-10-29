@@ -129,9 +129,22 @@ def _fallback_frame(i: int, out_dir: Path) -> Path:
     return path
 
 
+THIRD_PARTY_PROVIDERS = {"pixabay", "wikimedia_commons", "pixabay_video"}
+MAX_AI_FRAMES = 10
+
+
+def max_uses_for(provider: str) -> int:
+    """How many shots one asset may fill: third-party once, AI/original twice."""
+    return 1 if provider in THIRD_PARTY_PROVIDERS else 2
+
+
 def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = None) -> list[Path]:
-    """Resolve real visuals through rights-gated providers, then gradient fallback."""
-    from .visuals import select_visual
+    """Resolve real visuals through rights-gated providers, then gradient fallback.
+
+    Per segment: an optional Pixabay video clip (motion tier, tried first in the
+    shot plan) plus one still (Wikimedia → Pixabay still → FLUX → gradient).
+    """
+    from .visuals import select_visual, select_video_clip, flux_prompt
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +160,8 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
     manifest = []
     frames = []
     used_hashes = set()
+    used_clip_ids = set()
+    clips_enabled = os.environ.get("ENABLE_PIXABAY_VIDEO", "1").strip() != "0"
     review_required = False
     gemini_disabled = False
     gemini_key = get_gemini_key()
@@ -163,7 +178,7 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
         if gemini_first_try and gemini_key and not gemini_disabled:
             model = gemini_models[0] if gemini_models else get_gemini_image_model()
             try:
-                _generate_image_gemini(str(prompt), out_path, gemini_key, model)
+                _generate_image_gemini(flux_prompt(intent), out_path, gemini_key, model)
                 _save_portrait(out_path)
                 digest = __import__("hashlib").sha256(out_path.read_bytes()).hexdigest()
                 if digest not in used_hashes:
@@ -203,6 +218,11 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
                 source = "gradient"
                 if intent.get("type") in {"news_event", "product"} and intent.get("real_image_essential"):
                     review_required = True
+        clip_meta = None
+        if clips_enabled:
+            clip_meta = select_video_clip(intent, out_dir / f"clip_{i}.mp4", used_clip_ids)
+            if clip_meta:
+                log(f"Segment {i}: Pixabay clip {clip_meta['asset_id']} ({clip_meta['duration_seconds']}s)")
         frames.append(out_path)
         manifest.append({
             "frame": out_path.name,
@@ -217,6 +237,9 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
             "sha256": metadata.get("sha256", ""),
             "relevance_score": metadata.get("relevance_score"),
             "max_shot_seconds": 5 if metadata.get("provider") in {"wikimedia_commons", "pixabay"} else None,
+            "max_uses": max_uses_for(metadata.get("provider", source)),
+            "segment_index": i,
+            "clip": clip_meta,
         })
 
     manifest_path = out_dir / "broll_manifest.json"
@@ -236,8 +259,9 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
 def _generic_visual_credits(manifest: list[dict]) -> str:
     """Credits are deliberately generic; never expose creator/photographer names."""
     providers = {item.get("provider") for item in manifest}
+    providers |= {(item.get("clip") or {}).get("provider") for item in manifest}
     labels = []
-    if "pixabay" in providers:
+    if "pixabay" in providers or "pixabay_video" in providers:
         labels.append("Pixabay")
     if "wikimedia_commons" in providers:
         labels.append("Wikimedia Commons (public domain)")
@@ -248,39 +272,123 @@ def _generic_visual_credits(manifest: list[dict]) -> str:
     return "Visuals: " + ", ".join(labels) if labels else ""
 
 
-def animate_frame(img_path: Path, out_path: Path, duration: float, effect: str = "zoom_in"):
-    """Ken Burns animation on a single frame."""
+def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
+    """Add FLUX frames when the manifest cannot fill `shots_needed` shots under the
+    reuse caps (third-party once, AI/original twice). Never exceeds MAX_AI_FRAMES
+    FLUX frames in total. Returns the number of frames added."""
+    from .visuals import _cloudflare_generate, flux_prompt
+
+    out_dir = Path(out_dir)
+    manifest_path = out_dir / "broll_manifest.json"
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    rows = data.get("assets", [])
+    capacity = 0
+    for row in rows:
+        capacity += row.get("max_uses") or max_uses_for(row.get("provider", ""))
+        if (row.get("clip") or {}).get("file") and (out_dir / row["clip"]["file"]).exists():
+            capacity += 1
+    ai_count = sum(1 for r in rows if r.get("provider") == "cloudflare_workers_ai")
+    added = 0
+    attempts = 0
+    segments = [r for r in rows if r.get("intent")] or [{"intent": {"keywords": ["technology hardware"]}, "segment_index": 0}]
+    while capacity < shots_needed and ai_count < MAX_AI_FRAMES and attempts < MAX_AI_FRAMES:
+        attempts += 1
+        # Spread extra frames over the segments that have the fewest visuals.
+        per_seg = {}
+        for r in rows:
+            seg = r.get("segment_index", 0)
+            per_seg[seg] = per_seg.get(seg, 0) + 1 + (1 if r.get("clip") else 0)
+        base = min(segments, key=lambda r: (per_seg.get(r.get("segment_index", 0), 0), r.get("segment_index", 0)))
+        intent = dict(base.get("intent") or {})
+        variant = 1 + ai_count + added
+        out_path = out_dir / f"broll_extra_{len(rows)}.png"
+        meta = _cloudflare_generate(flux_prompt(intent, variant=variant), out_path)
+        if not meta:
+            break  # FLUX unavailable / rate limited: gradients fill the gap
+        try:
+            _save_portrait(out_path)
+            meta["sha256"] = __import__("hashlib").sha256(out_path.read_bytes()).hexdigest()
+        except Exception:
+            out_path.unlink(missing_ok=True)
+            continue
+        rows.append({
+            "frame": out_path.name, "segment": base.get("segment", ""), "intent": base.get("intent"),
+            **{k: meta.get(k, "") for k in ("provider", "source_url", "asset_id", "license", "license_url",
+                                           "retrieved_at", "sha256")},
+            "relevance_score": None, "max_shot_seconds": None, "max_uses": 2,
+            "segment_index": base.get("segment_index", 0), "clip": None, "top_up": True,
+        })
+        capacity += 2
+        ai_count += 1
+        added += 1
+    if added:
+        data["assets"] = rows
+        data["credits"] = _generic_visual_credits(rows)
+        manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        log(f"Added {added} FLUX frame(s) so no frame appears more than twice")
+    return added
+
+
+def animate_frame(img_path: Path, out_path: Path, duration: float, effect: str = "zoom_in", variant: int = 0):
+    """Ken Burns animation on a single frame.
+
+    `variant` > 0 is used when a frame appears a second time: the move is
+    anchored on a different region (tighter, off-centre crop) so the repeat
+    reads as a new shot rather than a copy.
+    """
     fps = 30
-    frames = int(duration * fps)
+    frames = max(1, int(round(duration * fps)))
     w, h = VIDEO_WIDTH, VIDEO_HEIGHT
+    # Focus point as a fraction of the free (zoomed-out) area; centre by default.
+    fx, fy = ((0.5, 0.5), (0.2, 0.3), (0.8, 0.7), (0.3, 0.75))[variant % 4]
+    zmax = 1.12 if not variant else 1.28
+    pz = 1.15 if not variant else 1.3
 
     if effect == "zoom_in":
         vf = (
-            f"scale={int(w * 1.12)}:{int(h * 1.12)},"
-            f"zoompan=z='1.12-0.12*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f"scale={int(w * zmax)}:{int(h * zmax)},"
+            f"zoompan=z='{zmax}-{zmax - 1:.2f}*on/{frames}':x='(iw-iw/zoom)*{fx}':y='(ih-ih/zoom)*{fy}'"
             f":d={frames}:s={w}x{h}:fps={fps}"
         )
     elif effect == "pan_right":
         vf = (
-            f"scale={int(w * 1.15)}:{int(h * 1.15)},"
-            f"zoompan=z=1.15:x='0.15*iw*on/{frames}':y='ih*0.075'"
+            f"scale={int(w * pz)}:{int(h * pz)},"
+            f"zoompan=z={pz}:x='(iw-iw/zoom)*on/{frames}':y='(ih-ih/zoom)*{fy}'"
             f":d={frames}:s={w}x{h}:fps={fps}"
         )
     elif effect == "pan_left":
         vf = (
-            f"scale={int(w * 1.15)}:{int(h * 1.15)},"
-            f"zoompan=z=1.15:x='0.15*iw-0.15*iw*on/{frames}':y='ih*0.075'"
+            f"scale={int(w * pz)}:{int(h * pz)},"
+            f"zoompan=z={pz}:x='(iw-iw/zoom)*(1-on/{frames})':y='(ih-ih/zoom)*{fy}'"
             f":d={frames}:s={w}x{h}:fps={fps}"
         )
     else:  # zoom_out
         vf = (
-            f"scale={int(w * 1.12)}:{int(h * 1.12)},"
-            f"zoompan=z='1.0+0.12*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f"scale={int(w * zmax)}:{int(h * zmax)},"
+            f"zoompan=z='1.0+{zmax - 1:.2f}*on/{frames}':x='(iw-iw/zoom)*{fx}':y='(ih-ih/zoom)*{fy}'"
             f":d={frames}:s={w}x{h}:fps={fps}"
         )
 
     run_cmd([
         "ffmpeg", "-loop", "1", "-i", str(img_path),
-        "-vf", vf, "-t", str(duration), "-r", str(fps),
+        "-vf", vf, "-frames:v", str(frames), "-r", str(fps),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", str(out_path), "-y", "-loglevel", "quiet",
+    ])
+
+
+def render_clip_shot(clip_path: Path, out_path: Path, duration: float):
+    """Fit a normalized clip into exactly `duration` seconds (clone last frame if short)."""
+    fps = 30
+    frames = max(1, int(round(duration * fps)))
+    run_cmd([
+        "ffmpeg", "-i", str(clip_path),
+        "-vf", f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
+               f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},fps={fps},setsar=1,"
+               f"tpad=stop_mode=clone:stop_duration={duration:.2f},format=yuv420p",
+        "-frames:v", str(frames), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        str(out_path), "-y", "-loglevel", "quiet",
     ])

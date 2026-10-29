@@ -57,6 +57,79 @@ def _group_words(words: list[dict], group_size: int = 4) -> list[list[dict]]:
     return groups
 
 
+def group_caption_lines(words: list[dict], max_words: int = 4, min_words: int = 2,
+                        max_chars: int = 18, pause: float = 0.35) -> list[list[dict]]:
+    """Readable caption lines of 2-5 words.
+
+    Breaks after sentence/clause punctuation, on pauses, or when the line would
+    exceed max_words/max_chars; single-word leftovers are merged into the
+    neighbouring line when that keeps it within 5 words.
+    """
+    max_words = min(5, max(2, int(max_words or 4)))
+    lines, cur = [], []
+    for i, w in enumerate(words):
+        if cur:
+            text_len = len(" ".join(x["word"] for x in cur + [w]))
+            gap = w["start"] - cur[-1]["end"]
+            if len(cur) >= max_words or (text_len > max_chars and len(cur) >= min_words) or \
+                    (gap > pause and len(cur) >= min_words):
+                lines.append(cur)
+                cur = []
+        cur.append(w)
+        if cur and len(cur) >= min_words and str(w["word"]).rstrip()[-1:] in ".!?;:,":
+            lines.append(cur)
+            cur = []
+    if cur:
+        lines.append(cur)
+    merged = []
+    for line in lines:
+        if len(line) == 1 and merged and len(merged[-1]) < 5 and \
+                str(merged[-1][-1]["word"]).rstrip()[-1:] not in ".!?":
+            merged[-1] = merged[-1] + line
+        else:
+            merged.append(line)
+    # A leading single word joins the following line if room.
+    if len(merged) >= 2 and len(merged[0]) == 1 and len(merged[1]) < 5:
+        merged[1] = merged[0] + merged[1]
+        merged.pop(0)
+    return merged
+
+
+CAPTION_FONT_CHAIN = ["Montserrat", "Inter", "DejaVu Sans"]
+
+
+def _installed_font_families() -> set[str]:
+    import subprocess
+    try:
+        r = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True, timeout=10)
+        fams = set()
+        for line in r.stdout.splitlines():
+            for name in line.split(","):
+                fams.add(name.strip().casefold())
+        return fams
+    except Exception:
+        return set()
+
+
+def resolve_caption_font(preferred: str = "", installed: set[str] | None = None) -> str:
+    """Brand caption font: Montserrat → Inter → DejaVu Sans.
+
+    A non-default niche font (e.g. a CJK font for ko/ja) is kept when installed.
+    """
+    installed = _installed_font_families() if installed is None else installed
+    pref = str(preferred or "").strip()
+    if pref and pref.casefold() not in {"arial", "montserrat", "inter", "dejavu sans"} and pref.casefold() in installed:
+        return pref
+    for name in CAPTION_FONT_CHAIN:
+        if name.casefold() in installed:
+            return name
+    return pref if pref and pref.casefold() != "arial" else "DejaVu Sans"
+
+
+def _ass_escape(text: str) -> str:
+    return str(text).replace("\\", "").replace("{", "(").replace("}", ")")
+
+
 def _format_ass_time(seconds: float) -> str:
     """Format seconds to ASS timestamp: H:MM:SS.cc (centiseconds)."""
     h = int(seconds // 3600)
@@ -74,78 +147,82 @@ def _generate_ass(
     highlight_color: str = "#FFFF00",
     group_size: int = 4,
     font_family: str = "Arial",
-    font_size: int = 72,
+    font_size: int = 92,
+    smart_lines: bool = True,
 ):
-    """Generate ASS subtitle file with word-by-word color highlighting.
+    """Generate ASS subtitles with active-word highlighting.
 
-    White text for inactive words, highlight color for current word.
-    Semi-transparent background, positioned at lower third (~70% down).
-
-    The font_family is taken from the niche profile (captions.font_family) so
-    non-Latin scripts (Korean, Japanese, Chinese, Arabic, etc.) can render
-    correctly. The default "Arial" preserves the original behavior for English.
+    Style: bold brand font (Montserrat → Inter → DejaVu Sans Bold), white text,
+    thick black outline + soft shadow, centred ~20% from the bottom, 2-5 words
+    per line, each line fading in/out over 80 ms. One Dialogue event per word
+    (the active word is coloured and slightly enlarged); events within a line
+    are contiguous so the line does not flicker between words.
     """
-    # ASS header
-    margin_v = int(video_height * 0.25)  # ~75% down from top = 25% from bottom
+    font = resolve_caption_font(font_family)
+    margin_v = int(video_height * 0.20)
+    outline = max(4, int(round(font_size * 0.085)))
+    shadow = max(2, int(round(font_size * 0.04)))
     header = f"""[Script Info]
 Title: Pipeline Captions
 ScriptType: v4.00+
 PlayResX: {video_width}
 PlayResY: {video_height}
 WrapStyle: 0
+ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_family},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,3,0,2,40,40,{margin_v},1
+Style: Default,{font},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,1,0,1,{outline},{shadow},2,60,60,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-    # Convert hex color to ASS BGR format (e.g. #00FF88 -> 88FF00).
-    # Override tags use &HBBGGRR& without the alpha byte.
     hc = highlight_color.lstrip("#")
     if len(hc) == 6:
         ass_highlight = f"&H{hc[4:6]}{hc[2:4]}{hc[0:2]}&"
     else:
-        ass_highlight = "&H00FFFF&"  # fallback yellow
+        ass_highlight = "&H00FFFF&"
 
-    groups = _group_words(words, group_size=group_size)
+    if smart_lines:
+        groups = group_caption_lines(words, max_words=group_size)
+    else:
+        groups = _group_words(words, group_size=group_size)
     events = []
-
-    for group in groups:
+    for gi, group in enumerate(groups):
         if not group:
             continue
-
-        group_start = group[0]["start"]
-        group_end = group[-1]["end"]
-
-        # For each word in the group being active, emit one dialogue line
+        next_start = groups[gi + 1][0]["start"] if gi + 1 < len(groups) and groups[gi + 1] else None
+        line_end = group[-1]["end"] + 0.25
+        if next_start is not None:
+            line_end = min(line_end, next_start)
+        line_end = max(line_end, group[-1]["end"])
         for active_idx, active_word in enumerate(group):
             start = active_word["start"]
-            end = active_word["end"]
-
-            # Build text with override tags: highlight color for active, white for rest
+            end = group[active_idx + 1]["start"] if active_idx + 1 < len(group) else line_end
+            end = max(end, start + 0.05)
+            fade_in = 80 if active_idx == 0 else 0
+            fade_out = 80 if active_idx == len(group) - 1 else 0
             parts = []
             for j, w in enumerate(group):
+                word = _ass_escape(w["word"])
                 if j == active_idx:
-                    parts.append(f"{{\\c{ass_highlight}\\b1\\fs80}}{w['word']}{{\\r}}")
+                    parts.append(f"{{\\c{ass_highlight}\\fscx110\\fscy110}}{word}{{\\r}}")
                 else:
-                    parts.append(w["word"])
-
-            text = " ".join(parts)
+                    parts.append(word)
+            text = f"{{\\fad({fade_in},{fade_out})}}" + " ".join(parts)
             events.append(
                 f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Default,,0,0,0,,{text}"
             )
 
-    output_path.write_text(header + "\n".join(events), encoding="utf-8")
-    log(f"ASS captions saved: {output_path.name}")
+    output_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+    log(f"ASS captions saved: {output_path.name} (font: {font}, {len(groups)} lines)")
     return output_path
 
 
-def _generate_srt(words: list[dict], output_path: Path, group_size: int = 4) -> Path:
+def _generate_srt(words: list[dict], output_path: Path, group_size: int = 4, smart_lines: bool = False) -> Path:
     """Generate standard SRT file from word timestamps."""
-    groups = _group_words(words, group_size=group_size)
+    groups = group_caption_lines(words, max_words=group_size) if smart_lines else _group_words(words, group_size=group_size)
     lines = []
 
     for i, group in enumerate(groups, 1):
@@ -180,7 +257,7 @@ def generate_captions(
     highlight_color: str = "#FFFF00",
     words_per_group: int = 4,
     font_family: str = "Arial",
-    font_size: int = 72,
+    font_size: int = 92,
 ) -> dict:
     """Generate captions: ASS (for burn-in) + SRT (for YouTube upload).
 
@@ -222,7 +299,7 @@ def generate_captions(
 
     # Generate SRT
     srt_path = work_dir / f"captions_{lang}.srt"
-    _generate_srt(words, srt_path, group_size=words_per_group)
+    _generate_srt(words, srt_path, group_size=words_per_group, smart_lines=True)
     result["srt_path"] = str(srt_path)
 
     # Generate ASS for burn-in (niche-aware highlight color)

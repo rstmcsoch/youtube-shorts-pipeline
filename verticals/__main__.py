@@ -65,6 +65,21 @@ def cmd_draft(args):
     return out_path
 
 
+def _apply_visual_manifest(draft, draft_path, manifest_path):
+    """Merge visual credits + review flag from the b-roll manifest into the draft."""
+    import json
+    visual_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    credits = visual_manifest.get("credits", "")
+    description = draft.get("youtube_description", "")
+    if credits and credits not in description:
+        # Replace an older generic credit line rather than stacking two.
+        lines = [l for l in description.replace("\\n", "\n").split("\n") if not l.startswith("Visuals: ")]
+        draft["youtube_description"] = ("\n".join(lines).rstrip() + "\n\n" + credits).strip()
+    draft["review_required"] = bool(draft.get("review_required", False) or visual_manifest.get("review_required", False))
+    draft["broll_manifest"] = str(manifest_path)
+    draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def cmd_produce(args):
     from .broll import generate_broll
     from .tts import generate_voiceover
@@ -106,15 +121,7 @@ def cmd_produce(args):
             visual_intents=draft.get("visual_intents", []),
         )
         manifest_path = work_dir / "broll_manifest.json"
-        visual_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-        credits = visual_manifest.get("credits", "")
-        if credits:
-            description = draft.get("youtube_description", "")
-            if credits not in description:
-                draft["youtube_description"] = (description.rstrip() + "\\n\\n" + credits).strip()
-        draft["review_required"] = bool(draft.get("review_required", False) or visual_manifest.get("review_required", False))
-        draft["broll_manifest"] = str(manifest_path)
-        draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
+        _apply_visual_manifest(draft, draft_path, manifest_path)
         state.complete_stage("broll", {
             "frames": [str(f) for f in frames],
             "manifest": str(manifest_path),
@@ -126,9 +133,12 @@ def cmd_produce(args):
 
     # Voiceover (niche-aware voice selection)
     if force or not state.is_done("voiceover"):
+        # Kokoro and Edge both use the niche's Edge voice as the fallback voice.
+        niche_voice_key = {None: "edge_tts", "edge": "edge_tts", "kokoro": "edge_tts", "auto": "edge_tts"}.get(
+            tts_provider, tts_provider or "edge_tts")
         voice_config = get_voice_config(
             profile,
-            provider=tts_provider or "edge_tts",
+            provider=niche_voice_key,
             lang=lang,
         )
         vo_path = generate_voiceover(
@@ -137,6 +147,25 @@ def cmd_produce(args):
             voice_config=voice_config,
         )
         state.complete_stage("voiceover", {"path": str(vo_path)})
+        # Length window + enough distinct visuals for the actual narration length.
+        from .assemble import get_audio_duration, SHOT_TARGET_SECONDS
+        from .broll import top_up_ai_frames
+        import math
+        try:
+            vo_seconds = get_audio_duration(vo_path)
+        except Exception:
+            vo_seconds = 0.0
+        draft["voiceover_seconds"] = round(vo_seconds, 2)
+        if vo_seconds and not (45.0 <= vo_seconds <= 75.0):
+            log(f"WARNING: voiceover is {vo_seconds:.1f}s (target 45-75 s); flagged for review")
+            draft["review_required"] = True
+            draft.setdefault("review_reasons", []).append(f"Voiceover length {vo_seconds:.1f}s outside 45-75 s")
+        manifest_path = work_dir / "broll_manifest.json"
+        if vo_seconds and manifest_path.exists():
+            if top_up_ai_frames(work_dir, math.ceil(vo_seconds / SHOT_TARGET_SECONDS)):
+                _apply_visual_manifest(draft, draft_path, manifest_path)
+        _record_voice_meta(work_dir)
+        draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
     else:
         log("Skipping voiceover (already done)")
         vo_path = Path(state.get_artifact("voiceover", "path"))
@@ -169,16 +198,19 @@ def cmd_produce(args):
             vo_path, work_dir,
             duck_speech=music_config.get("duck_volume_speech", 0.12),
             duck_gap=music_config.get("duck_volume_gap", 0.25),
+            words=captions_result.get("words"),
         )
         state.complete_stage("music", {
             "track_path": str(music_result.get("track_path", "")),
             "duck_filter": music_result.get("duck_filter", ""),
+            "gain_db": music_result.get("gain_db", -22.0),
         })
     else:
         log("Skipping music (already done)")
         music_result = {
             "track_path": state.get_artifact("music", "track_path", ""),
             "duck_filter": state.get_artifact("music", "duck_filter", ""),
+            "gain_db": state.get_artifact("music", "gain_db", -22.0),
         }
 
     # Assemble
@@ -190,8 +222,9 @@ def cmd_produce(args):
             job_id=job_id,
             lang=lang,
             ass_path=captions_result.get("ass_path"),
-            music_path=music_result.get("track_path"),
+            music_path=music_result.get("track_path") or None,
             duck_filter=music_result.get("duck_filter"),
+            music_gain_db=float(music_result.get("gain_db") or -22.0),
         )
         state.complete_stage("assemble", {"video_path": str(video_path)})
     else:
@@ -210,6 +243,24 @@ def cmd_produce(args):
 
     print(f"\n  Video: {video_path}")
     return video_path
+
+
+def _record_voice_meta(work_dir):
+    """Copy the TTS provider/voice record into the manifest's "audio" section."""
+    import json
+    meta_path = Path(work_dir) / "voiceover_meta.json"
+    manifest_path = Path(work_dir) / "broll_manifest.json"
+    if not meta_path.exists() or not manifest_path.exists():
+        return
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        audio = data.get("audio") or {}
+        audio["voice"] = json.loads(meta_path.read_text(encoding="utf-8"))
+        audio["loudness"] = "loudnorm I=-14 LUFS, TP=-1.5 dBTP, LRA=11 (two-pass)"
+        data["audio"] = audio
+        manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
 
 
 def cmd_upload(args):
@@ -405,7 +456,7 @@ def main():
     p_produce = sub.add_parser("produce", help="Generate video from draft")
     p_produce.add_argument("--draft", required=True)
     p_produce.add_argument("--lang", default="en", choices=["en", "hi", "es", "pt", "de", "fr", "ja", "ko"])
-    p_produce.add_argument("--voice", default=None, help="TTS: edge, elevenlabs, 60db, say")
+    p_produce.add_argument("--voice", default=None, help="TTS: kokoro, edge, elevenlabs, 60db, say")
     p_produce.add_argument("--script", default=None, help="Override script text")
     p_produce.add_argument("--force", action="store_true", help="Redo all stages")
 
@@ -421,7 +472,7 @@ def main():
     p_run.add_argument("--niche", default="general", help=niche_help)
     p_run.add_argument("--platform", default="shorts", choices=["shorts", "reels", "tiktok", "all"])
     p_run.add_argument("--provider", default=None, help="LLM: claude, gemini, openai, ollama")
-    p_run.add_argument("--voice", default=None, help="TTS: edge, elevenlabs, 60db, say")
+    p_run.add_argument("--voice", default=None, help="TTS: kokoro, edge, elevenlabs, 60db, say")
     p_run.add_argument("--lang", default="en", choices=["en", "hi", "es", "pt", "de", "fr", "ja", "ko"])
     p_run.add_argument("--dry-run", action="store_true")
     p_run.add_argument("--context", default="")

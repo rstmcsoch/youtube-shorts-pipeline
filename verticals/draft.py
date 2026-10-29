@@ -91,6 +91,47 @@ def _generate_json_response(prompt: str, provider: str | None) -> dict:
             ) from second_error
 
 
+SCRIPT_MIN_WORDS = 115  # ≈47-50 s (Kokoro ≈2.3-2.4 words/s incl. pauses)
+SCRIPT_MAX_WORDS = 170  # ≈72 s
+
+
+def script_length_problem(script: str) -> str:
+    """'' when the script fits the 45-75 s window, else 'short'/'long'.
+
+    Stub scripts under 40 words (tests, manual overrides) are left alone.
+    """
+    n = len(str(script or "").split())
+    if n < 40:
+        return ""
+    if n < SCRIPT_MIN_WORDS - 10:
+        return "short"
+    if n > SCRIPT_MAX_WORDS + 10:
+        return "long"
+    return ""
+
+
+def _enforce_script_length(draft: dict, prompt: str, provider: str | None) -> dict:
+    """One corrective regeneration when the script would fall outside 45-75 s."""
+    problem = script_length_problem(draft.get("script", ""))
+    if not problem:
+        return draft
+    n = len(str(draft.get("script", "")).split())
+    log(f"Draft script is {n} words ({problem}); requesting one length-corrected rewrite.")
+    fix = (
+        prompt + f"\n\nLENGTH CORRECTION: your previous script had {n} words, which is too {problem}. "
+        f"Rewrite it to {SCRIPT_MIN_WORDS + 10}-{SCRIPT_MAX_WORDS - 20} words, keep the same facts and hook, "
+        "and return the complete JSON object again."
+    )
+    try:
+        retry = _generate_json_response(fix, provider)
+    except Exception as exc:
+        log(f"Length-corrected rewrite failed ({exc}); keeping the original draft.")
+        return draft
+    if isinstance(retry, dict) and retry.get("script") and not script_length_problem(retry.get("script", "")):
+        return retry
+    return draft
+
+
 def generate_draft(
     news: str,
     channel_context: str = "",
@@ -155,7 +196,7 @@ def generate_draft(
 
     channel_note = f"\nChannel context: {channel_context}" if channel_context else ""
 
-    prompt = f"""You are writing a {platform_label} script ({max_words} words max, ~60-90 seconds spoken).{channel_note}
+    prompt = f"""You are writing a {platform_label} script of {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words (45-75 seconds spoken; aim for about 145 words).{channel_note}
 
 {script_context}
 
@@ -172,6 +213,9 @@ RULES:
 - Anti-hallucination: only use factual claims supported by the research above; do not invent facts, names, numbers, quotes, or events.
 - STRICT DYPOL PRIVACY/STYLE RULE: Do not include any personal names of real people anywhere in any output field. This applies to the narration script, YouTube title, YouTube description, tags, Instagram caption, TikTok caption, thumbnail prompt, and every b-roll prompt. Do not name public figures, executives, creators, politicians, researchers, or any other individual, even when their names appear in the topic or research. Refer to people only by role or generic description (for example, "the company's CEO", "a technology researcher", or "the platform's founder"). Company, product, organization, and place names are allowed when relevant; individual people's names are not.
 - Before returning JSON, review every field and remove personal names, including names embedded in quoted text, examples, hashtags, or thumbnail/on-screen-text instructions. If the topic cannot be covered accurately without a person's name, rewrite it as a general explanation rather than including the name.
+- HOOK (first ~1.5 seconds): the very first sentence is the hook. It must be at most 10 words, start with the most surprising concrete fact, number, or tension in the story, and work even with the sound off as an on-screen caption. No greeting, no channel name, no "in this video", no "let me explain", no setup before the hook.
+- The first broll_prompt / visual_intent must be the single most striking, high-motion visual for the story (it is the opening shot): concrete and immediately readable, never an abstract background.
+- LENGTH: the script must be {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words so the voiceover lands between 45 and 75 seconds.
 - Follow the TONE, PACING, and HOOK PATTERNS from the niche profile above
 - Pick the most appropriate hook pattern for this specific topic
 - Use one of the CTA OPTIONS at the end
@@ -196,6 +240,7 @@ Output JSON exactly:
 }}"""
 
     draft = _generate_json_response(prompt, provider)
+    draft = _enforce_script_length(draft, prompt, provider)
 
     # Validate and sanitize LLM output fields
     expected_str_fields = [

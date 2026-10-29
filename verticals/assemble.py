@@ -1,10 +1,17 @@
-"""ffmpeg video assembly — frames + voiceover + music + captions."""
+"""ffmpeg video assembly — shot plan (clips + stills) + voiceover + music + captions."""
 
+import json
+import math
+import re
 from pathlib import Path
 
-from .broll import animate_frame
+from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PROVIDERS
 from .config import MEDIA_DIR, run_cmd
 from .log import log
+
+EFFECTS = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
+SHOT_TARGET_SECONDS = 4.0
+LOUDNORM = {"I": -14.0, "TP": -1.5, "LRA": 11.0}
 
 
 def _ffmpeg_has_libass() -> bool:
@@ -30,6 +37,156 @@ def get_audio_duration(path: Path) -> float:
     return float(r.stdout.strip())
 
 
+# ─────────────────────────────────────────────────────
+# Shot plan
+# ─────────────────────────────────────────────────────
+
+def build_sources(frames: list[Path], out_dir: Path) -> list[dict]:
+    """Visual sources from the b-roll manifest: per segment an optional clip, then the still."""
+    out_dir = Path(out_dir)
+    try:
+        rows = json.loads((out_dir / "broll_manifest.json").read_text(encoding="utf-8")).get("assets", [])
+    except (OSError, ValueError, AttributeError):
+        rows = []
+    sources = []
+    by_name = {r.get("frame"): r for r in rows}
+    seen = set()
+    ordered = [(Path(f), by_name.get(Path(f).name, rows[i] if i < len(rows) else {})) for i, f in enumerate(frames)]
+    # Top-up frames live only in the manifest.
+    for r in rows:
+        if r.get("frame") and r["frame"] not in {Path(f).name for f in frames}:
+            ordered.append((out_dir / r["frame"], r))
+    for i, (path, row) in enumerate(ordered):
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
+        seg = row.get("segment_index", i)
+        clip = row.get("clip") or {}
+        if clip.get("file") and (out_dir / clip["file"]).exists():
+            sources.append({"path": out_dir / clip["file"], "kind": "clip", "provider": clip.get("provider", "pixabay_video"),
+                            "segment": seg, "max_uses": 1,
+                            "max_len": float(clip.get("duration_seconds") or SHOT_TARGET_SECONDS)})
+        provider = row.get("provider", "")
+        sources.append({"path": path, "kind": "still", "provider": provider, "segment": seg,
+                        "max_uses": int(row.get("max_uses") or max_uses_for(provider)),
+                        "max_len": 5.0 if provider in THIRD_PARTY_PROVIDERS else None})
+    return sources
+
+
+def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET_SECONDS) -> list[dict]:
+    """Assign ~target-second shots to sources in narration order.
+
+    Rules: clips and third-party stills appear once; AI/original stills at most
+    twice, and a repeat gets a different camera move + crop variant; never the
+    same source twice in a row; gradients only when nothing else is left.
+    Returns dicts {source (index or None), duration, effect, variant}.
+    """
+    n_shots = max(1, math.ceil(duration / target - 1e-6))
+    shot_len = duration / n_shots
+    uses = [0] * len(sources)
+    first_effect = {}
+    n_seg = max([s.get("segment", 0) for s in sources] + [0]) + 1
+    shots, prev = [], None
+    for k in range(n_shots):
+        seg_target = min(n_seg - 1, int(k * n_seg / n_shots))
+        best, best_key = None, None
+        for idx, src in enumerate(sources):
+            if uses[idx] >= src.get("max_uses", 1) or idx == prev:
+                continue
+            dist = abs(src.get("segment", 0) - seg_target)
+            behind = src.get("segment", 0) < seg_target
+            key = (dist > 1, uses[idx], dist, behind, 0 if src.get("kind") == "clip" else 1, idx)
+            if best_key is None or key < best_key:
+                best, best_key = idx, key
+        if best is None:
+            shots.append({"source": None, "duration": shot_len, "effect": EFFECTS[k % 4], "variant": 0})
+            prev = None
+            continue
+        src = sources[best]
+        if uses[best] == 0:
+            effect, variant = EFFECTS[k % 4], 0
+            first_effect[best] = effect
+        else:
+            first = first_effect.get(best, EFFECTS[0])
+            effect = EFFECTS[(EFFECTS.index(first) + 2) % 4]  # opposite move
+            variant = uses[best]
+        uses[best] += 1
+        prev = best
+        shots.append({"source": best, "duration": shot_len, "effect": effect, "variant": variant})
+    return shots
+
+
+def shot_capacity(sources: list[dict]) -> int:
+    return sum(int(s.get("max_uses", 1)) for s in sources)
+
+
+# ─────────────────────────────────────────────────────
+# Audio: optional music bed (sidechain ducked) + loudnorm -14 LUFS
+# ─────────────────────────────────────────────────────
+
+def music_filter_graph(duration: float, music_gain_db: float = -22.0) -> str:
+    """Voice [1:a] + music [2:a]; music is ducked under the voice with sidechaincompress."""
+    return (
+        f"[2:a]atrim=0:{duration:.3f},asetpts=N/SR/TB,volume={music_gain_db}dB,"
+        f"afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5[bed];"
+        f"[1:a]asplit=2[voice][sc];"
+        f"[bed][sc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=350[ducked];"
+        f"[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
+    )
+
+
+def loudnorm_filter(measured: dict | None = None) -> str:
+    base = f"loudnorm=I={LOUDNORM['I']:g}:TP={LOUDNORM['TP']:g}:LRA={LOUDNORM['LRA']:g}"
+    if not measured:
+        return base
+    return (base + f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+            f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+            f":offset={measured['target_offset']}:linear=true")
+
+
+def _parse_loudnorm_json(stderr: str) -> dict | None:
+    match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr or "", re.S)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        float(data["input_i"])  # "-inf" for silence → ValueError
+        if not math.isfinite(float(data["input_i"])):
+            return None
+        return data
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def prepare_audio(voiceover: Path, out_dir: Path, duration: float,
+                  music_path: str | None = None, music_gain_db: float = -22.0) -> Path:
+    """Mix (voice + optional ducked music) and normalize to -14 LUFS, two-pass."""
+    out_dir = Path(out_dir)
+    mix = out_dir / "audio_mix.wav"
+    if music_path and Path(music_path).exists():
+        run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-i", str(voiceover),
+                 "-stream_loop", "-1", "-i", str(music_path), "-filter_complex", music_filter_graph(duration, music_gain_db),
+                 "-map", "[mix]", "-t", f"{duration:.3f}", "-ar", "48000", "-ac", "2", str(mix)])
+    else:
+        run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(voiceover), "-t", f"{duration:.3f}",
+                 "-ar", "48000", "-ac", "2", str(mix)])
+    final = out_dir / "audio_final.wav"
+    measured = None
+    try:
+        r = run_cmd(["ffmpeg", "-hide_banner", "-nostats", "-i", str(mix),
+                     "-af", loudnorm_filter() + ":print_format=json", "-f", "null", "-"], capture=True)
+        measured = _parse_loudnorm_json((r.stderr or "") + (r.stdout or ""))
+    except Exception as exc:
+        log(f"loudnorm measure pass failed ({exc}); using single-pass")
+    run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(mix), "-af", loudnorm_filter(measured),
+             "-ar", "48000", "-ac", "2", str(final)])
+    return final
+
+
+# ─────────────────────────────────────────────────────
+# Assembly
+# ─────────────────────────────────────────────────────
+
 def assemble_video(
     frames: list[Path],
     voiceover: Path,
@@ -38,83 +195,58 @@ def assemble_video(
     lang: str = "en",
     ass_path: str | None = None,
     music_path: str | None = None,
-    duck_filter: str | None = None,
+    duck_filter: str | None = None,  # legacy; music is now ducked with sidechaincompress
+    music_gain_db: float = -22.0,
 ) -> Path:
-    """Assemble final video from frames, voiceover, captions, and music."""
+    """Assemble final video from shots, voiceover, captions, and optional music."""
     log("Assembling video...")
+    out_dir = Path(out_dir)
     duration = get_audio_duration(voiceover)
-    effects = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
 
-    # Shot plan: cut every ~4 s so the picture keeps moving with the narration.
-    # Third-party stills (Pixabay / Wikimedia) are used once and never longer
-    # than 5 s; AI-generated or original frames may return with a different
-    # camera move. Gradients are only used when nothing else is available.
-    manifest_path = Path(out_dir) / "broll_manifest.json"
-    try:
-        manifest = __import__("json").loads(manifest_path.read_text(encoding="utf-8"))
-        asset_rows = manifest.get("assets", [])
-    except (OSError, ValueError, AttributeError):
-        asset_rows = []
-    providers = []
-    for i, frame in enumerate(frames):
-        row = asset_rows[i] if i < len(asset_rows) else {}
-        providers.append(row.get("provider", ""))
-    third_party = {"pixabay", "wikimedia_commons"}
-    target = 4.0
-    import math
-    n_shots = max(1, math.ceil(duration / target))
-    shot_len = duration / n_shots
-    used_third = set()
-    shots = []
-    order = list(range(len(frames)))
-    pos = 0
-    for k in range(n_shots):
-        pick = None
-        for step in range(len(order)):
-            idx = order[(pos + step) % len(order)] if order else None
-            if idx is None:
-                break
-            if providers[idx] in third_party and idx in used_third:
-                continue
-            pick = idx
-            pos = (pos + step + 1) % len(order)
-            break
-        if pick is None:
-            from .broll import _fallback_frame
-            shots.append((_fallback_frame(200 + k, Path(out_dir)), shot_len, k))
-            continue
-        if providers[pick] in third_party:
-            used_third.add(pick)
-        shots.append((frames[pick], min(shot_len, 5.0), k))
+    sources = build_sources(frames, out_dir)
+    plan = plan_shots(sources, duration)
+    (out_dir / "shot_plan.json").write_text(json.dumps([
+        {**shot, "file": str(sources[shot["source"]]["path"].name) if shot["source"] is not None else "gradient",
+         "kind": sources[shot["source"]]["kind"] if shot["source"] is not None else "gradient"}
+        for shot in plan], indent=2), encoding="utf-8")
 
-    # Animate each shot with Ken Burns effect
     animated = []
-    for i, (frame, shot_duration, effect_index) in enumerate(shots):
+    for i, shot in enumerate(plan):
         anim = out_dir / f"anim_{i}.mp4"
-        animate_frame(frame, anim, shot_duration, effects[effect_index % len(effects)])
+        if shot["source"] is None:
+            from .broll import _fallback_frame
+            animate_frame(_fallback_frame(200 + i, out_dir), anim, shot["duration"], shot["effect"])
+        else:
+            src = sources[shot["source"]]
+            if src["kind"] == "clip":
+                render_clip_shot(src["path"], anim, shot["duration"])
+            else:
+                animate_frame(src["path"], anim, shot["duration"], shot["effect"], variant=shot["variant"])
         animated.append(anim)
 
-    # Concat animated segments (escape single quotes for ffmpeg concat demuxer)
     concat_file = out_dir / "concat.txt"
+
     def _esc(p):
-        return str(p).replace("'", "'\\''" )
+        return str(p).replace("'", "'\\''")
     concat_file.write_text("\n".join(f"file '{_esc(p)}'" for p in animated))
 
+    # Every shot is encoded identically (1080x1920, 30 fps, yuv420p H.264), so a
+    # stream copy concat is lossless and fast; re-encode only if it fails.
     merged_video = out_dir / "merged_video.mp4"
-    run_cmd([
-        "ffmpeg", "-f", "concat", "-safe", "0", "-i", str(concat_file),
-        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-        str(merged_video), "-y", "-loglevel", "quiet",
-    ])
+    try:
+        run_cmd(["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy",
+                 str(merged_video), "-y", "-loglevel", "quiet"])
+    except Exception:
+        run_cmd(["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                 "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", "30",
+                 str(merged_video), "-y", "-loglevel", "quiet"])
 
-    # Build the final ffmpeg command with optional captions + music
+    audio = prepare_audio(voiceover, out_dir, duration, music_path, music_gain_db)
+
     out_path = MEDIA_DIR / f"verticals_{job_id}_{lang}.mp4"
-
-    # Determine video filter (captions via ASS)
-    vf_parts = []
+    vf_parts = ["tpad=stop_mode=clone:stop_duration=1"]  # never cut the last words
     if ass_path and Path(ass_path).exists():
         if _ffmpeg_has_libass():
-            # Escape special chars in path for ffmpeg filter
             escaped_ass = str(ass_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             vf_parts.append(f"ass={escaped_ass}")
         else:
@@ -124,48 +256,12 @@ def assemble_video(
                 "an ffmpeg with libass (brew/apt builds include it) for "
                 "burned-in captions."
             )
-    vf = ",".join(vf_parts) if vf_parts else None
-
-    if music_path and Path(music_path).exists():
-        # Three inputs: video, voiceover, music
-        cmd = ["ffmpeg", "-i", str(merged_video), "-i", str(voiceover)]
-
-        # Loop music to match video duration, apply ducking
-        music_filter = f"[2:a]aloop=loop=-1:size=2e+09,atrim=0:{duration}"
-        if duck_filter:
-            music_filter += f",{duck_filter}"
-        music_filter += "[music]"
-
-        # Mix voiceover + ducked music
-        audio_filter = f"{music_filter};[1:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-
-        cmd += [
-            "-stream_loop", "-1", "-i", str(music_path),
-            "-filter_complex", audio_filter,
-        ]
-
-        if vf:
-            cmd += ["-vf", vf]
-
-        cmd += [
-            "-map", "0:v", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-shortest",
-            str(out_path), "-y", "-loglevel", "quiet",
-        ]
-    else:
-        # Two inputs: video + voiceover (no music)
-        cmd = ["ffmpeg", "-i", str(merged_video), "-i", str(voiceover)]
-
-        if vf:
-            cmd += ["-vf", vf]
-
-        cmd += [
-            "-c:v", "libx264" if vf else "copy",
-            "-c:a", "aac", "-shortest",
-            str(out_path), "-y", "-loglevel", "quiet",
-        ]
-
-    run_cmd(cmd)
+    run_cmd([
+        "ffmpeg", "-i", str(merged_video), "-i", str(audio),
+        "-vf", ",".join(vf_parts), "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{duration:.3f}",
+        "-movflags", "+faststart", str(out_path), "-y", "-loglevel", "quiet",
+    ])
     log(f"Video assembled: {out_path}")
     return out_path
