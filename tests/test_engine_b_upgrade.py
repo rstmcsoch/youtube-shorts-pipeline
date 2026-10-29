@@ -479,3 +479,21 @@ class TestTechAnchorAndDarkness:
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x114", "-frames:v", "1", str(black)], check=True)
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=64x114", "-frames:v", "1", str(grey)], check=True)
         assert too_dark(black) and not too_dark(grey)
+
+
+class TestCaptionScriptAlignment:
+    def test_misheard_words_take_script_spelling(self):
+        from verticals.captions import align_words_to_script
+        words = [{"word": w, "start": i, "end": i + 0.5} for i, w in
+                 enumerate(["Meet", "Gemini", "for", "carbon,", "today."])]
+        out = align_words_to_script(words, "Meet Gemini 4 Carbon, today.")
+        assert [w["word"] for w in out] == ["Meet", "Gemini", "4", "Carbon,", "today."]
+        assert out[2]["start"] == 2
+
+    def test_uneven_run_respread(self):
+        from verticals.captions import align_words_to_script
+        words = [{"word": "They", "start": 0, "end": 0.4}, {"word": "misnovell", "start": 0.4, "end": 1.0},
+                 {"word": "attack", "start": 1.0, "end": 1.4}]
+        out = align_words_to_script(words, "They miss novel attack")
+        assert [w["word"] for w in out] == ["They", "miss", "novel", "attack"]
+        assert out[1]["start"] == 0.4 and out[2]["end"] == 1.0

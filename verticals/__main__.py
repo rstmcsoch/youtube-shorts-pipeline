@@ -179,6 +179,7 @@ def cmd_produce(args):
             words_per_group=caption_config.get("words_per_group", 4),
             font_family=caption_config.get("font_family", "Arial"),
             font_size=int(caption_config.get("font_size", 72)),
+            script=script or "",
         )
         state.complete_stage("captions", {
             "srt_path": str(captions_result.get("srt_path", "")),

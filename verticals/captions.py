@@ -50,6 +50,40 @@ def _whisper_word_timestamps(audio_path: Path, lang: str = "en") -> list[dict]:
     return words
 
 
+def align_words_to_script(words: list[dict], script: str) -> list[dict]:
+    """Replace Whisper's word text with the script's spelling, keeping timings.
+
+    Whisper mishears names and jargon ("Gemini 4 Carbon" -> "Gemini for carbon").
+    Equal-length differing runs are swapped word-for-word; other runs keep
+    Whisper's text but are re-spread over the script words when counts differ
+    by little, so captions always show what the script actually says.
+    """
+    import difflib, re
+    if not words or not script:
+        return words
+    script_words = script.split()
+    norm = lambda t: re.sub(r"[^a-z0-9]", "", t.casefold())
+    a = [norm(w["word"]) for w in words]
+    b = [norm(w) for w in script_words]
+    out = []
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            for k in range(i2 - i1):
+                out.append({**words[i1 + k], "word": script_words[j1 + k]})
+        elif tag == "replace" and i2 > i1 and j2 > j1:
+            start, end = words[i1]["start"], words[i2 - 1]["end"]
+            n = j2 - j1
+            step = (end - start) / n
+            for k in range(n):
+                out.append({"word": script_words[j1 + k], "start": round(start + k * step, 3),
+                            "end": round(start + (k + 1) * step, 3)})
+        elif tag == "delete":
+            out.extend(words[i1:i2])
+        # "insert": script words Whisper never heard (not spoken) are skipped.
+    return out
+
+
 def _group_words(words: list[dict], group_size: int = 4) -> list[list[dict]]:
     groups = []
     for i in range(0, len(words), group_size):
@@ -258,6 +292,7 @@ def generate_captions(
     words_per_group: int = 4,
     font_family: str = "Arial",
     font_size: int = 92,
+    script: str = "",
 ) -> dict:
     """Generate captions: ASS (for burn-in) + SRT (for YouTube upload).
 
@@ -272,6 +307,8 @@ def generate_captions(
     Returns dict with keys: srt_path, ass_path, words (for music ducking).
     """
     words = _whisper_word_timestamps(audio_path, lang)
+    if script:
+        words = align_words_to_script(words, script)
 
     result = {"words": words}
 

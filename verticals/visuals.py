@@ -88,10 +88,8 @@ TECH_ANCHORS = {
     "security", "hacker", "hacking", "technology", "tech", "digital", "chip", "chips", "processor",
     "cpu", "gpu", "circuit", "electronics", "electronic", "laptop", "keyboard", "monitor", "screen",
     "internet", "cable", "cables", "fiber", "optic", "robot", "robotics", "artificial", "intelligence",
-    "ai", "algorithm", "cloud", "smartphone", "phone", "device", "devices", "office", "control",
-    "binary", "matrix", "router", "switch", "lock", "padlock", "encryption", "firewall", "virus",
-    "malware", "password", "online", "web", "website", "app", "dashboard", "analytics", "machine",
-    "automation", "engineer", "engineering", "semiconductor", "silicon", "microchip", "motherboard",
+    "ai", "algorithm", "smartphone",     "binary", "matrix", "router", "padlock", "encryption", "firewall", "virus",
+    "malware", "password", "website", "dashboard", "analytics", "automation", "engineer", "engineering", "semiconductor", "silicon", "microchip", "motherboard",
 }
 
 
