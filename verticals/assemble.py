@@ -2,7 +2,9 @@
 
 import json
 import math
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PROVIDERS
@@ -12,6 +14,17 @@ from .log import log
 EFFECTS = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
 SHOT_TARGET_SECONDS = 4.0
 LOUDNORM = {"I": -14.0, "TP": -1.5, "LRA": 11.0}
+
+
+def assemble_workers() -> int:
+    """Concurrent shot encodes: $DYPOL_ASSEMBLE_WORKERS, else up to 4 (one per runner core)."""
+    try:
+        value = int(os.environ.get("DYPOL_ASSEMBLE_WORKERS", "") or 0)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        value = min(4, os.cpu_count() or 1)
+    return max(1, value)
 
 
 def _ffmpeg_has_libass() -> bool:
@@ -210,8 +223,7 @@ def assemble_video(
          "kind": sources[shot["source"]]["kind"] if shot["source"] is not None else "gradient"}
         for shot in plan], indent=2), encoding="utf-8")
 
-    animated = []
-    for i, shot in enumerate(plan):
+    def _render_shot(i, shot):
         anim = out_dir / f"anim_{i}.mp4"
         if shot["source"] is None:
             from .broll import _fallback_frame
@@ -222,7 +234,16 @@ def assemble_video(
                 render_clip_shot(src["path"], anim, shot["duration"])
             else:
                 animate_frame(src["path"], anim, shot["duration"], shot["effect"], variant=shot["variant"])
-        animated.append(anim)
+        return anim
+
+    # Speed: every shot is an independent ffmpeg encode (zoompan is single-threaded),
+    # so shots render concurrently; the audio mix/loudnorm passes run alongside them.
+    # Each shot's file and encode settings are unchanged, so the output is identical.
+    workers = assemble_workers()
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="shot") as pool:
+        audio_future = pool.submit(prepare_audio, voiceover, out_dir, duration, music_path, music_gain_db)
+        animated = list(pool.map(lambda item: _render_shot(*item), enumerate(plan)))
+        audio = audio_future.result()
 
     concat_file = out_dir / "concat.txt"
 
@@ -240,8 +261,6 @@ def assemble_video(
         run_cmd(["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(concat_file),
                  "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", "30",
                  str(merged_video), "-y", "-loglevel", "quiet"])
-
-    audio = prepare_audio(voiceover, out_dir, duration, music_path, music_gain_db)
 
     out_path = MEDIA_DIR / f"verticals_{job_id}_{lang}.mp4"
     vf_parts = ["tpad=stop_mode=clone:stop_duration=1"]  # never cut the last words

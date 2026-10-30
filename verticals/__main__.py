@@ -40,13 +40,20 @@ def cmd_draft(args):
     provider = getattr(args, "provider", None)
 
     print(f"\n  Drafting: {args.news} [niche: {niche}, platform: {platform}]\n")
-    draft = generate_draft(
-        args.news,
-        getattr(args, "context", ""),
-        niche=niche,
-        platform=platform,
-        provider=provider,
-    )
+    from .draft import PersonalNamesError
+    try:
+        draft = generate_draft(
+            args.news,
+            getattr(args, "context", ""),
+            niche=niche,
+            platform=platform,
+            provider=provider,
+            reviewer_feedback=getattr(args, "reviewer_feedback", None),
+        )
+    except PersonalNamesError as exc:
+        # Fail fast before any media is fetched or rendered.
+        print(f"\n  ERROR: {exc}")
+        sys.exit(3)
     draft["job_id"] = job_id
 
     out_path = DRAFTS_DIR / f"{job_id}.json"
@@ -85,6 +92,11 @@ def _apply_visual_manifest(draft, draft_path, manifest_path):
     draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _parallel_produce_enabled() -> bool:
+    import os
+    return os.environ.get("DYPOL_PARALLEL_PRODUCE", "1").strip() not in {"0", "false", "no"}
+
+
 def cmd_produce(args):
     from .broll import generate_broll
     from .tts import generate_voiceover
@@ -118,14 +130,40 @@ def cmd_produce(args):
 
     print(f"\n  Producing {lang.upper()} video for job {job_id} [niche: {niche_name}]")
 
+    need_broll = force or not state.is_done("broll")
+    need_voiceover = force or not state.is_done("voiceover")
+
+    def _voice_config():
+        # Kokoro and Edge both use the niche's Edge voice as the fallback voice.
+        niche_voice_key = {None: "edge_tts", "edge": "edge_tts", "kokoro": "edge_tts", "auto": "edge_tts"}.get(
+            tts_provider, tts_provider or "edge_tts")
+        return get_voice_config(profile, provider=niche_voice_key, lang=lang)
+
+    # Speed: b-roll search/download is network-bound and the voiceover is local CPU
+    # (Kokoro) or a separate service (Edge); neither reads the other's output, so the
+    # voiceover is synthesised in a worker thread while b-roll is gathered.
+    vo_pool = vo_future = None
+    if need_broll and need_voiceover and _parallel_produce_enabled():
+        from concurrent.futures import ThreadPoolExecutor
+        vo_config = _voice_config()
+        vo_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voiceover")
+        vo_future = vo_pool.submit(
+            generate_voiceover, script, work_dir, lang, provider=tts_provider, voice_config=vo_config)
+        log("Voiceover running in parallel with b-roll gathering")
+
     # B-roll
-    if force or not state.is_done("broll"):
-        frames = generate_broll(
-            draft.get("broll_prompts", ["Cinematic landscape"] * 3),
-            work_dir,
-            visual_intents=draft.get("visual_intents", []),
-            video_title=draft.get("youtube_title") or draft.get("news", ""),
-        )
+    if need_broll:
+        try:
+            frames = generate_broll(
+                draft.get("broll_prompts", ["Cinematic landscape"] * 3),
+                work_dir,
+                visual_intents=draft.get("visual_intents", []),
+                video_title=draft.get("youtube_title") or draft.get("news", ""),
+            )
+        except BaseException:
+            if vo_pool is not None:
+                vo_pool.shutdown(wait=False, cancel_futures=True)
+            raise
         manifest_path = work_dir / "broll_manifest.json"
         _apply_visual_manifest(draft, draft_path, manifest_path)
         state.complete_stage("broll", {
@@ -138,20 +176,18 @@ def cmd_produce(args):
         frames = [Path(f) for f in state.get_artifact("broll", "frames", [])]
 
     # Voiceover (niche-aware voice selection)
-    if force or not state.is_done("voiceover"):
-        # Kokoro and Edge both use the niche's Edge voice as the fallback voice.
-        niche_voice_key = {None: "edge_tts", "edge": "edge_tts", "kokoro": "edge_tts", "auto": "edge_tts"}.get(
-            tts_provider, tts_provider or "edge_tts")
-        voice_config = get_voice_config(
-            profile,
-            provider=niche_voice_key,
-            lang=lang,
-        )
-        vo_path = generate_voiceover(
-            script, work_dir, lang,
-            provider=tts_provider,
-            voice_config=voice_config,
-        )
+    if need_voiceover:
+        if vo_future is not None:
+            try:
+                vo_path = vo_future.result()
+            finally:
+                vo_pool.shutdown(wait=True)
+        else:
+            vo_path = generate_voiceover(
+                script, work_dir, lang,
+                provider=tts_provider,
+                voice_config=_voice_config(),
+            )
         state.complete_stage("voiceover", {"path": str(vo_path)})
         # Length window + enough distinct visuals for the actual narration length.
         from .assemble import get_audio_duration, SHOT_TARGET_SECONDS
@@ -463,6 +499,8 @@ def main():
     p_draft.add_argument("--discover", action="store_true", help="Use topic engine")
     p_draft.add_argument("--auto-pick", action="store_true", help="Let LLM pick the best topic")
     p_draft.add_argument("--dry-run", action="store_true", help="Draft only")
+    p_draft.add_argument("--reviewer-feedback", default=None,
+                         help="Reviewer notes for a regenerate (default: $REVIEWER_FEEDBACK; capped 1500 chars)")
 
     # produce
     p_produce = sub.add_parser("produce", help="Generate video from draft")

@@ -68,6 +68,20 @@ def speed_for_target(seconds: float, speed: float, lo: float = VO_MIN_SECONDS, h
     return None
 
 
+VO_MAX_SILENCE_PAD = 1.5  # seconds of trailing silence instead of a full re-render
+
+
+def short_padding_seconds(seconds: float, lo: float = VO_MIN_SECONDS, max_pad: float = VO_MAX_SILENCE_PAD) -> float:
+    """Trailing silence that lifts a voiceover just under the window into it, else 0.
+
+    A 44.9 s render needs 0.35 s of tail silence, not a second ~20 s Kokoro pass
+    at a different speed; the spoken audio is untouched.
+    """
+    if seconds <= 0 or seconds >= lo or lo - seconds > max_pad:
+        return 0.0
+    return round(lo - seconds + 0.25, 3)
+
+
 def kokoro_model_dir() -> Path:
     default = Path.home() / ".cache" / "kokoro-onnx"
     return Path(os.environ.get("KOKORO_MODEL_DIR", str(default))).expanduser()
@@ -150,6 +164,14 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
     # do it (one re-render at most, speed stays within 0.95-1.2).
     if samples is not None and len(samples):
         seconds = len(samples) / float(sample_rate)
+        pad = short_padding_seconds(seconds)
+        if pad:
+            import numpy as np
+            log(f"Kokoro voiceover {seconds:.1f}s just under {VO_MIN_SECONDS}s; adding {pad:.2f}s tail silence "
+                "instead of re-rendering")
+            samples = np.concatenate([np.asarray(samples), np.zeros(int(round(pad * sample_rate)),
+                                                                     dtype=np.asarray(samples).dtype)])
+            seconds = len(samples) / float(sample_rate)
         new_speed = speed_for_target(seconds, cfg["speed"])
         if new_speed is not None:
             log(f"Kokoro voiceover {seconds:.1f}s outside {VO_MIN_SECONDS}-{VO_MAX_SECONDS}s; re-rendering at speed {new_speed}")
