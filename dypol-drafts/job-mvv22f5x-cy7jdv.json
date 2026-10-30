@@ -1,0 +1,11 @@
+{
+  "job_id": "job-mvv22f5x-cy7jdv",
+  "producing_run_id": "41070414223",
+  "artifact_name": "draft-job-mvv22f5x-cy7jdv",
+  "draft_file": "1793369899.json",
+  "language": "en",
+  "title": "How AI Actually Catches Deepfakes",
+  "topic": "How AI spots deepfake videos",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793369899_en/broll_manifest.json"
+}
