@@ -321,13 +321,130 @@ def _cloudflare_generate(prompt, output_path):
         return None
 
 
-def select_visual(intent, output_path, used_hashes=None):
+def _judge():
+    """The run's visual judge, or None when unavailable (the judge never blocks the pipeline)."""
+    try:
+        from .visual_judge import get_judge
+        judge = get_judge()
+        return judge if judge.active else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _prefilter_ok(candidate, intent, kind):
+    """Mechanical gates that need no download (relevance, tags, resolution, entity match)."""
+    if not candidate.get("download_url"):
+        return False
+    if relevance_score(candidate, intent) < 0.20:
+        return False
+    if candidate.get("provider") == "pixabay" and not stock_candidate_ok(candidate, intent):
+        return False
+    if int(candidate.get("width") or 0) < 360 or int(candidate.get("height") or 0) < 640:
+        return False
+    if kind in {"news_event", "product"} and intent.get("entities"):
+        entity_terms = _tokens(" ".join(intent.get("entities") or []))
+        title_terms = _tokens(candidate.get("title", ""))
+        entity_match = len(entity_terms & title_terms) / max(1, len(entity_terms))
+        if entity_match < 0.25:
+            return False
+    return True
+
+
+def _asset_key(candidate):
+    return f"{candidate.get('provider', '')}:{candidate.get('asset_id', '')}"
+
+
+def _select_visual_judged(judge, intent, output_path, used_hashes, query, providers, ctx):
+    """Stock stills with the AI judge after the mechanical filters: up to 5 judged
+    candidates, then 3 from a broadened query; PASS stops, best MARGINAL is the
+    last resort. Returns (metadata | None, needs_review, review_reason)."""
+    from .visual_judge import ShotJudging, CANDIDATES_PER_SHOT, BROADENED_CANDIDATES, broaden_query, \
+        verdict_fields
+    kind = intent.get("type", "concept")
+    shot = ShotJudging(judge, CANDIDATES_PER_SHOT)
+    output_path = Path(output_path)
+    marginal_path = output_path.with_name(output_path.stem + "_marginal" + output_path.suffix)
+    tried = set()
+    narration = str(intent.get("segment") or intent.get("prompt") or "")
+
+    def attempt(provider_list, q):
+        for provider in provider_list:
+            try:
+                candidates = _wikimedia_candidates(q) if provider == "wikimedia" else _pixabay_candidates(q)
+            except (requests.RequestException, ValueError, KeyError):
+                candidates = []
+            for candidate in sorted(candidates, key=lambda c: relevance_score(c, intent), reverse=True):
+                if not shot.can_judge_more() and shot.active:
+                    return None
+                key = _asset_key(candidate)
+                if key in tried or not _prefilter_ok(candidate, intent, kind):
+                    continue
+                tried.add(key)
+                if judge.is_rejected(key, q):
+                    continue  # rejection memory, before downloading
+                try:
+                    metadata = _download_candidate(dict(candidate), output_path)
+                except (requests.RequestException, OSError, ValueError):
+                    output_path.unlink(missing_ok=True)
+                    continue
+                if too_dark(output_path) or metadata["sha256"] in used_hashes:
+                    output_path.unlink(missing_ok=True)
+                    continue
+                verdict = judge.judge_image(output_path, ctx.get("video_title", ""), narration, q, key)
+                outcome = shot.consider(verdict, (metadata, q))
+                if outcome in ("accept", "unjudged"):
+                    metadata.pop("download_url", None)
+                    metadata["relevance_score"] = relevance_score(candidate, intent)
+                    metadata["query"] = q
+                    if verdict:
+                        metadata["judge"] = verdict_fields(verdict)
+                    used_hashes.add(metadata["sha256"])
+                    return metadata
+                if outcome == "keep_marginal":
+                    output_path.replace(marginal_path)
+                    continue
+                output_path.unlink(missing_ok=True)
+        return None
+
+    found = attempt(providers, query)
+    broad = broaden_query(query)
+    if found is None and broad and shot.active:
+        shot.extend(BROADENED_CANDIDATES)
+        found = attempt(["pixabay"], broad)
+    if found is not None:
+        marginal_path.unlink(missing_ok=True)
+        return found, False, ""
+    if shot.marginal and marginal_path.exists():
+        verdict, (metadata, q) = shot.marginal
+        marginal_path.replace(output_path)
+        metadata.pop("download_url", None)
+        metadata["relevance_score"] = relevance_score(metadata, intent)
+        metadata["query"] = q
+        reason = f"best MARGINAL still after {shot.judged} judged candidates"
+        metadata["judge"] = verdict_fields(verdict, True, reason)
+        used_hashes.add(metadata["sha256"])
+        return metadata, True, reason
+    marginal_path.unlink(missing_ok=True)
+    if shot.judged:
+        return None, True, f"judge rejected all {shot.judged} stock candidates"
+    return None, False, ""
+
+
+def select_visual(intent, output_path, used_hashes=None, ctx=None):
     """Resolve one still using the intent-specific order; returns (manifest, review_required)."""
     used_hashes = used_hashes if used_hashes is not None else set()
     kind = intent.get("type", "concept")
     query = " ".join([*(intent.get("entities") or []), *(intent.get("keywords") or [])]).strip()
     query = query or str(intent.get("prompt", "technology concept"))
     providers = ["wikimedia", "pixabay"] if kind in {"news_event", "product"} else ["pixabay"]
+    judge = _judge()
+    judge_review, judge_reason = False, ""
+    if judge is not None:
+        found, judge_review, judge_reason = _select_visual_judged(
+            judge, intent, output_path, used_hashes, query, providers, ctx or {})
+        if found is not None:
+            return found, judge_review
+        providers = []  # every stock candidate was judged; fall through to FLUX / gradient
     candidates = []
     for provider in providers:
         try:
@@ -336,21 +453,8 @@ def select_visual(intent, output_path, used_hashes=None):
             candidates = []
         ranked = sorted(candidates, key=lambda c: relevance_score(c, intent), reverse=True)
         for candidate in ranked:
-            if not candidate.get("download_url"):
+            if not _prefilter_ok(candidate, intent, kind):
                 continue
-            score = relevance_score(candidate, intent)
-            if score < 0.20:
-                continue
-            if candidate.get("provider") == "pixabay" and not stock_candidate_ok(candidate, intent):
-                continue
-            if int(candidate.get("width") or 0) < 360 or int(candidate.get("height") or 0) < 640:
-                continue
-            if kind in {"news_event", "product"} and intent.get("entities"):
-                entity_terms = _tokens(" ".join(intent.get("entities") or []))
-                title_terms = _tokens(candidate.get("title", ""))
-                entity_match = len(entity_terms & title_terms) / max(1, len(entity_terms))
-                if entity_match < 0.25:
-                    continue
             try:
                 metadata = _download_candidate(candidate, output_path)
                 if too_dark(output_path):
@@ -367,17 +471,24 @@ def select_visual(intent, output_path, used_hashes=None):
             except (requests.RequestException, OSError, ValueError):
                 output_path.unlink(missing_ok=True)
                 continue
+
+    def _flag(meta):
+        if judge_review:
+            meta["judge"] = {"decision": "not_judged", "needs_review": True,
+                             "review_reason": f"{judge_reason}; used {meta.get('provider')} fallback"}
+        return meta
     ai = _cloudflare_generate(flux_prompt(intent), output_path)
     if ai:
         digest = ai["sha256"]
         if digest not in used_hashes:
             used_hashes.add(digest)
-            return ai, False
+            return _flag(ai), judge_review
         output_path.unlink(missing_ok=True)
     output_path.unlink(missing_ok=True)
-    return {"provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
-            "license": "Original generated gradient", "license_url": "", "retrieved_at": _now(),
-            "sha256": ""}, bool(kind in {"news_event", "product"} and intent.get("real_image_essential"))
+    return _flag({"provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
+                  "license": "Original generated gradient", "license_url": "", "retrieved_at": _now(),
+                  "sha256": ""}), bool(judge_review or (kind in {"news_event", "product"}
+                                                         and intent.get("real_image_essential")))
 
 
 # ─────────────────────────────────────────────────────
@@ -485,21 +596,32 @@ def normalize_clip(raw_path, out_path, width=1080, height=1920, max_seconds=CLIP
     return round(_probe_duration(out_path), 3)
 
 
-def select_video_clip(intent, out_path, used_ids=None):
-    """Best relevant Pixabay clip for a segment → (metadata | None). Never raises."""
+def select_video_clip(intent, out_path, used_ids=None, ctx=None):
+    """Best relevant Pixabay clip for a segment → (metadata | None). Never raises.
+
+    With the AI judge active, up to 5 clips that pass the mechanical filters are
+    judged on their 50 % frame (25 % retry only for low_quality); a clip is only
+    taken on PASS (a MARGINAL clip is not worth a shot slot: the still covers it).
+    """
     used_ids = used_ids if used_ids is not None else set()
     try:
         candidates = pixabay_video_candidates(intent)
     except Exception:
         return None
+    judge = _judge()
     ranked = sorted(
         (c for c in candidates if c.get("duration", 0) >= 3 and c["asset_id"] not in used_ids
          and stock_candidate_ok(c, intent)),
         key=lambda c: (len(tag_overlap(c, intent)), c["height"] > c["width"], relevance_score(c, intent)),
         reverse=True,
     )
+    limit = 3
+    if judge is not None:
+        from .visual_judge import CANDIDATES_PER_SHOT
+        ranked = [c for c in ranked if not judge.is_rejected(_asset_key(c), c.get("query", ""))]
+        limit = CANDIDATES_PER_SHOT
     raw = Path(out_path).with_name(Path(out_path).stem + "_raw.mp4")
-    for candidate in ranked[:3]:
+    for candidate in ranked[:limit]:
         try:
             with requests.get(candidate["download_url"], stream=True, timeout=(5, 60)) as r:
                 r.raise_for_status()
@@ -513,6 +635,13 @@ def select_video_clip(intent, out_path, used_ids=None):
             clip_seconds = normalize_clip(raw, out_path)
             if too_dark(out_path, video=True):
                 raise ValueError("clip too dark")
+            verdict = None
+            if judge is not None and judge.active:
+                verdict = judge.judge_clip(out_path, (ctx or {}).get("video_title", ""),
+                                           str(intent.get("segment") or ""), candidate.get("query", ""),
+                                           _asset_key(candidate))
+                if verdict is not None and verdict.get("decision") != "PASS":
+                    raise ValueError(f"judge {verdict.get('decision')}")
             used_ids.add(candidate["asset_id"])
             meta = {k: candidate[k] for k in ("provider", "source_url", "asset_id", "license", "license_url",
                                                 "rendition", "query")}
@@ -523,6 +652,9 @@ def select_video_clip(intent, out_path, used_ids=None):
                 "retrieved_at": _now(), "relevance_score": relevance_score(candidate, intent),
                 "matched_tags": sorted(tag_overlap(candidate, intent)), "max_uses": 1,
             })
+            if verdict is not None:
+                from .visual_judge import verdict_fields
+                meta["judge"] = verdict_fields(verdict)
             return meta
         except Exception:
             Path(out_path).unlink(missing_ok=True)

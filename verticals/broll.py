@@ -138,7 +138,25 @@ def max_uses_for(provider: str) -> int:
     return 1 if provider in THIRD_PARTY_PROVIDERS else 2
 
 
-def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = None) -> list[Path]:
+def _get_judge():
+    try:
+        from .visual_judge import get_judge
+        return get_judge()
+    except Exception:  # noqa: BLE001 - the judge must never block the pipeline
+        return None
+
+
+def _judge_block(judge):
+    if judge is None:
+        return {"judge_status": "disabled"}
+    try:
+        return judge.summary("short")
+    except Exception as exc:  # noqa: BLE001
+        return {"judge_status": "disabled", "error": str(exc)[:200]}
+
+
+def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = None,
+                   video_title: str = "") -> list[Path]:
     """Resolve real visuals through rights-gated providers, then gradient fallback.
 
     Per segment: an optional Pixabay video clip (motion tier, tried first in the
@@ -159,6 +177,11 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
 
     manifest = []
     frames = []
+    judge = _get_judge()
+    if judge is not None:
+        judge.begin_video("short")
+    judge_ctx = {"video_title": video_title or ""}
+    shot_review_reasons = []
     used_hashes = set()
     used_clip_ids = set()
     clips_enabled = os.environ.get("ENABLE_PIXABAY_VIDEO", "1").strip() != "0"
@@ -197,7 +220,9 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
                 if "429" in message and ("limit: 0" in message or "quota" in message):
                     gemini_disabled = True
         if metadata is None:
-            metadata, needs_review = select_visual(intent, out_path, used_hashes)
+            metadata, needs_review = select_visual(intent, out_path, used_hashes, ctx=judge_ctx)
+            if (metadata.get("judge") or {}).get("needs_review"):
+                shot_review_reasons.append(f"Segment {i}: visual judge: {metadata['judge'].get('review_reason')}")
         review_required = review_required or needs_review
         source = metadata.get("provider", "gradient")
         if source == "gradient":
@@ -220,7 +245,7 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
                     review_required = True
         clip_meta = None
         if clips_enabled:
-            clip_meta = select_video_clip(intent, out_dir / f"clip_{i}.mp4", used_clip_ids)
+            clip_meta = select_video_clip(intent, out_dir / f"clip_{i}.mp4", used_clip_ids, ctx=judge_ctx)
             if clip_meta:
                 log(f"Segment {i}: Pixabay clip {clip_meta['asset_id']} ({clip_meta['duration_seconds']}s)")
         frames.append(out_path)
@@ -240,14 +265,28 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
             "max_uses": max_uses_for(metadata.get("provider", source)),
             "segment_index": i,
             "clip": clip_meta,
+            "judge_status": judge.status if judge is not None else "disabled",
+            **({"judge": metadata["judge"]} if metadata.get("judge") else {}),
         })
 
+    judge_summary = _judge_block(judge)
+    reasons = []
+    if any(row.get("provider") == "gradient" and (row.get("intent") or {}).get("type") in {"news_event", "product"}
+           and (row.get("intent") or {}).get("real_image_essential") for row in manifest) or \
+            (review_required and not shot_review_reasons):
+        reasons.append("A news/product segment requiring a real image used a fallback.")
+    reasons += shot_review_reasons
+    for reason in judge_summary.get("needs_review_reasons") or []:
+        reasons.append(f"visual judge: {reason}")
+    review_required = bool(review_required or reasons)
     manifest_path = out_dir / "broll_manifest.json"
     manifest_path.write_text(json.dumps({
         "assets": manifest,
         "review_required": review_required,
-        "review_reasons": ["A news/product segment requiring a real image used a fallback."] if review_required else [],
+        "review_reasons": reasons,
         "credits": _generic_visual_credits(manifest),
+        "judge_status": judge_summary.get("judge_status", "disabled"),
+        "judge": judge_summary,
     }, indent=2), encoding="utf-8")
     (out_dir / "visual_review_required.json").write_text(
         json.dumps({"review_required": review_required}, indent=2), encoding="utf-8"
@@ -330,6 +369,52 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
         manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         log(f"Added {added} FLUX frame(s) so no frame appears more than twice")
     return added
+
+
+def judge_contact_sheet(out_dir: Path, video_title: str = "") -> dict | None:
+    """Post-render check: one numbered 4x3 contact sheet of the stills (in segment order)
+    sent to the visual judge. Flags review_required in the manifest on bad shots,
+    circuit/caps; never raises and never blocks the pipeline."""
+    judge = _get_judge()
+    out_dir = Path(out_dir)
+    manifest_path = out_dir / "broll_manifest.json"
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if judge is None:
+        return None
+    try:
+        judge.begin_video("short")
+        rows = sorted(data.get("assets", []), key=lambda r: (r.get("segment_index", 0), bool(r.get("top_up"))))
+        tiles = [(out_dir / r["frame"], r.get("segment", ""), r) for r in rows
+                 if r.get("frame") and r.get("provider") != "gradient" and (out_dir / r["frame"]).exists()]
+        result = None
+        if judge.active and tiles:
+            result = judge.check_contact_sheet([(str(p), t) for p, t, _ in tiles], video_title, out_dir, "short")
+            for bad in (result or {}).get("bad_shots", []):
+                n = bad["n"] - 1
+                if 0 <= n < len(tiles):
+                    row = tiles[n][2]
+                    row["contact_sheet_flag"] = bad.get("reason", "")
+            for sheet in out_dir.glob("contact_sheet_short_*.jpg"):
+                sheet.unlink(missing_ok=True)
+        summary = judge.summary("short")
+        data["judge"] = summary
+        data["judge_status"] = summary.get("judge_status", "disabled")
+        reasons = [r for r in data.get("review_reasons", []) if not str(r).startswith("visual judge: ")]
+        reasons += [f"visual judge: {r}" for r in summary.get("needs_review_reasons") or []]
+        seg_reasons = [r for r in data.get("review_reasons", []) if str(r).startswith("Segment ")]
+        reasons = list(dict.fromkeys(seg_reasons + reasons))
+        data["review_reasons"] = reasons
+        data["review_required"] = bool(data.get("review_required") or reasons)
+        manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        if summary.get("needs_review"):
+            log(f"Visual judge needs review: {'; '.join(summary['needs_review_reasons'])}")
+        return {"contact_sheet": result, "summary": summary}
+    except Exception as exc:  # noqa: BLE001
+        log(f"Visual judge contact sheet skipped: {exc}")
+        return None
 
 
 def animate_frame(img_path: Path, out_path: Path, duration: float, effect: str = "zoom_in", variant: int = 0):

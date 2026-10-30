@@ -77,6 +77,9 @@ def _apply_visual_manifest(draft, draft_path, manifest_path):
         draft["youtube_description"] = ("\n".join(lines).rstrip() + "\n\n" + credits).strip()
     draft["review_required"] = bool(draft.get("review_required", False) or visual_manifest.get("review_required", False))
     draft["broll_manifest"] = str(manifest_path)
+    if visual_manifest.get("judge_status"):
+        draft["visual_judge_status"] = visual_manifest["judge_status"]
+        draft["visual_review_reasons"] = list(visual_manifest.get("review_reasons") or [])
     from .synthetic_media import manifest_has_ai_asset
     draft["contains_ai_visuals"] = manifest_has_ai_asset(visual_manifest)
     draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -121,6 +124,7 @@ def cmd_produce(args):
             draft.get("broll_prompts", ["Cinematic landscape"] * 3),
             work_dir,
             visual_intents=draft.get("visual_intents", []),
+            video_title=draft.get("youtube_title") or draft.get("news", ""),
         )
         manifest_path = work_dir / "broll_manifest.json"
         _apply_visual_manifest(draft, draft_path, manifest_path)
@@ -230,6 +234,11 @@ def cmd_produce(args):
             music_gain_db=float(music_result.get("gain_db") or -22.0),
         )
         state.complete_stage("assemble", {"video_path": str(video_path)})
+        # Post-render AI visual check (no-op when the judge is disabled; never blocks).
+        from .broll import judge_contact_sheet
+        manifest_path = work_dir / "broll_manifest.json"
+        if manifest_path.exists() and judge_contact_sheet(work_dir, draft.get("youtube_title", "")) is not None:
+            _apply_visual_manifest(draft, draft_path, manifest_path)
     else:
         log("Skipping assembly (already done)")
         video_path = Path(state.get_artifact("assemble", "video_path"))
