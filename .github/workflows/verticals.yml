@@ -279,6 +279,34 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      # Fast console preview: a small 720p H.264 copy (+faststart) in its own uncompressed
+      # artifact so the console can stream it instead of the full ~100 MB draft. Never fails the draft.
+      - name: Build small preview copy for the console
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p preview
+          VIDEO=$(find "$VERTICALS_HOME/media" -type f -name '*.mp4' -printf '%T@ %p\n' 2>/dev/null \
+                  | sort -rn | head -n 1 | cut -d' ' -f2- || true)
+          if [ -z "$VIDEO" ]; then echo "::warning::no rendered mp4 found; preview skipped"; exit 0; fi
+          ffmpeg -nostdin -y -hide_banner -loglevel error -i "$VIDEO" \
+            -vf "scale=-2:720,fps=30" -c:v libx264 -preset veryfast -profile:v main -pix_fmt yuv420p \
+            -crf 30 -maxrate 700k -bufsize 700k -g 60 \
+            -c:a aac -b:a 64k -ac 2 -ar 44100 -movflags +faststart preview/preview_short.mp4 \
+            && echo "preview: $(du -h preview/preview_short.mp4 | cut -f1)" \
+            || { echo "::warning::preview encode failed"; rm -f preview/preview_short.mp4; }
+
+      - name: Upload console preview artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ inputs.job_id || github.run_id }}
+          path: preview/
+          # Already-compressed mp4: store as-is (zip "stored") so the console can stream it.
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: warn
+
   publish:
     if: ${{ always() && (inputs.phase == 'publish' || (inputs.phase == 'full' && needs.produce.result == 'success' && inputs.auto_publish == '1' && inputs.review_required == '0')) }}
     needs: [produce]
