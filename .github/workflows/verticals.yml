@@ -1,4 +1,6 @@
 name: DYPOL Verticals production
+# The console matches runs to jobs by display_title, so it carries the job id and phase.
+run-name: "${{ inputs.job_id || github.run_id }} (${{ inputs.phase || 'n/a' }})"
 
 on:
   schedule:
@@ -63,6 +65,11 @@ on:
         description: 'Set 1 only after intentionally enabling automatic uploads'
         required: true
         default: '0'
+      reviewer_feedback:
+        description: 'Reviewer notes from a rejected attempt (redo); max 1500 chars are used'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: dypol-verticals-${{ github.ref }}
@@ -98,6 +105,9 @@ jobs:
       KOKORO_VOICE: ${{ vars.KOKORO_VOICE || 'af_heart' }}
       KOKORO_SPEED: ${{ vars.KOKORO_SPEED || '1.08' }}
       MUSIC_ENABLED: ${{ vars.MUSIC_ENABLED || '0' }}
+      REVIEWER_FEEDBACK: ${{ inputs.reviewer_feedback || '' }}
+      # Unbuffered output: per-stage timings in the log line up with real time.
+      PYTHONUNBUFFERED: '1'
     steps:
       - name: Checkout this branch
         uses: actions/checkout@v4
@@ -105,11 +115,19 @@ jobs:
           persist-credentials: true
 
       - name: Set up Python 3.11
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: requirements.txt
+
+      # Speed: the old setup-python pip cache restored ~3.5 GB (~40 s) and then still
+      # spent ~50 s in pip install. Caching the installed virtualenv skips both on a hit.
+      - name: Cache Python virtualenv (CPU torch + requirements)
+        id: venv-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.venv-dypol
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}-torchcpu-v1
 
       - name: Install system video tools and caption fonts
         run: |
@@ -121,12 +139,21 @@ jobs:
           fc-list : family | grep -iE "montserrat|dejavu sans" | sort -u | head -5 || true
 
       - name: Install Python dependencies and compile-check
+        env:
+          VENV_CACHE_HIT: ${{ steps.venv-cache.outputs.cache-hit }}
         run: |
-          python -m pip install --upgrade pip
-          # CPU-only torch for Whisper: far smaller/faster than the default CUDA wheels.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
-          python -m compileall -q verticals scripts
+          set -euo pipefail
+          if [ "${VENV_CACHE_HIT:-}" != "true" ]; then
+            python -m venv ~/.venv-dypol
+            ~/.venv-dypol/bin/python -m pip install --upgrade pip
+            # CPU-only torch for Whisper: far smaller/faster than the default CUDA wheels.
+            ~/.venv-dypol/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+            ~/.venv-dypol/bin/pip install -r requirements.txt
+          else
+            echo "Restored cached virtualenv; pip install skipped."
+          fi
+          echo "$HOME/.venv-dypol/bin" >> "$GITHUB_PATH"
+          ~/.venv-dypol/bin/python -m compileall -q verticals scripts
 
       - name: Cache Whisper model
         uses: actions/cache@v4
@@ -180,6 +207,10 @@ jobs:
           else
             ARGS+=(--discover --auto-pick)
           fi
+          # The draft step runs the no-personal-names check on the script + metadata
+          # BEFORE any b-roll/voice/render work (one automatic rewrite with feedback,
+          # then exit 3 with DYPOL_FAILURE_CATEGORY=content_gate). REVIEWER_FEEDBACK
+          # (job env) is injected into the script prompt.
           python -m verticals draft "${ARGS[@]}"
           DRAFT=$(ls -t "$VERTICALS_HOME"/drafts/*.json 2>/dev/null | head -n 1 || true)
           if [ -z "$DRAFT" ]; then
@@ -190,6 +221,7 @@ jobs:
           python -m verticals produce --draft "$DRAFT" --lang "$LANGUAGE" --voice kokoro
           CAPTION=$(find "$VERTICALS_HOME/media" -type f -name '*.srt' -print -quit)
           if [ -z "$CAPTION" ]; then echo "::error::Caption file missing; blocking draft handoff."; exit 1; fi
+          # Safety net: final metadata + burned-in captions after render.
           python scripts/validate_no_personal_names.py --draft "$DRAFT" --captions "$CAPTION"
           echo "No-personal-names gate passed; human review remains required. No YouTube upload was run."
 
@@ -242,7 +274,8 @@ jobs:
           path: |
             .verticals-runtime/drafts/**
             .verticals-runtime/media/**
-          retention-days: 14
+          # Drafts are ~100 MB; 3 days keeps the free 500 MB Actions storage from filling.
+          retention-days: 3
           include-hidden-files: true
           if-no-files-found: error
 
@@ -267,6 +300,7 @@ jobs:
       TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
       DESCRIPTION_OVERRIDE: ${{ inputs.description_override || '' }}
       TAGS_OVERRIDE: ${{ inputs.tags_override || '' }}
+      PYTHONUNBUFFERED: '1'
     steps:
       - name: Checkout this branch
         uses: actions/checkout@v4
@@ -274,23 +308,41 @@ jobs:
           persist-credentials: true
 
       - name: Set up Python 3.11
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: requirements.txt
+
+      # Speed: the old setup-python pip cache restored ~3.5 GB (~40 s) and then still
+      # spent ~50 s in pip install. Caching the installed virtualenv skips both on a hit.
+      - name: Cache Python virtualenv (CPU torch + requirements)
+        id: venv-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.venv-dypol
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}-torchcpu-v1
 
       - name: Install system video tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Install Python dependencies and compile-check
+        env:
+          VENV_CACHE_HIT: ${{ steps.venv-cache.outputs.cache-hit }}
         run: |
-          python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
-          python -m compileall -q verticals scripts
+          set -euo pipefail
+          if [ "${VENV_CACHE_HIT:-}" != "true" ]; then
+            python -m venv ~/.venv-dypol
+            ~/.venv-dypol/bin/python -m pip install --upgrade pip
+            # CPU-only torch for Whisper: far smaller/faster than the default CUDA wheels.
+            ~/.venv-dypol/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+            ~/.venv-dypol/bin/pip install -r requirements.txt
+          else
+            echo "Restored cached virtualenv; pip install skipped."
+          fi
+          echo "$HOME/.venv-dypol/bin" >> "$GITHUB_PATH"
+          ~/.venv-dypol/bin/python -m compileall -q verticals scripts
 
       - name: Resolve the exact producing run
         id: locate
@@ -384,14 +436,14 @@ jobs:
           set -euo pipefail
           CAPTIONS=()
           while IFS= read -r -d '' FILE; do CAPTIONS+=(--captions "$FILE"); done < <(find "$VERTICALS_HOME/media" -type f \( -name '*.srt' -o -name '*.vtt' \) -print0)
-          python scripts/validate_no_personal_names.py --draft "$DRAFT" "${CAPTIONS[@]}"
+          python scripts/validate_no_personal_names.py --draft "$DRAFT" "${CAPTIONS[@]}" 2>&1 | tee -a "$RUNNER_TEMP/dypol-publish.log"
 
       - name: Upload the reviewed video to YouTube
         env:
           YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy || 'private' }}
         run: |
           set -euo pipefail
-          python -m verticals upload --draft "$DRAFT" --lang "$LANGUAGE"
+          python -m verticals upload --draft "$DRAFT" --lang "$LANGUAGE" 2>&1 | tee -a "$RUNNER_TEMP/dypol-publish.log"
 
       - name: Write verified upload result
         if: always()
@@ -399,6 +451,7 @@ jobs:
           PRODUCING_RUN_ID: ${{ steps.locate.outputs.producing_run }}
           DRAFT_SOURCE: ${{ steps.locate.outputs.draft_source }}
           RUN_ID: ${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
           DRAFT="${DRAFT:-}"
@@ -421,6 +474,24 @@ jobs:
             BRANCH_NAME="${GITHUB_REF_NAME}"
             git fetch origin "$BRANCH_NAME"
             git rebase "origin/$BRANCH_NAME"
+            git push origin "HEAD:$BRANCH_NAME"
+          elif [ "$JOB_STATUS" != "success" ]; then
+            # Failed publish: record why (failure_category + redacted log tail) for the console.
+            python3 scripts/report_failure.py \
+              --job-id "$DYPOL_JOB_ID" --run-id "$RUN_ID" --phase "$PHASE" \
+              --log "$RUNNER_TEMP/dypol-publish.log" \
+              --default-category publish \
+              --extra "producing_run_id=$PRODUCING_RUN_ID" --extra "draft_source=$DRAFT_SOURCE" \
+              --out "dypol-results/$RUN_ID.json"
+            mkdir -p upload-backup
+            cp "dypol-results/$RUN_ID.json" upload-backup/upload_result.json
+            git config user.name 'github-actions[bot]'
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git add "dypol-results/$RUN_ID.json"
+            git commit -m "dypol: failed publish result for $RUN_ID" || true
+            BRANCH_NAME="${GITHUB_REF_NAME}"
+            git fetch origin "$BRANCH_NAME"
+            git rebase --autostash "origin/$BRANCH_NAME"
             git push origin "HEAD:$BRANCH_NAME"
           else
             echo "No verified upload ID found; no result file was written."
