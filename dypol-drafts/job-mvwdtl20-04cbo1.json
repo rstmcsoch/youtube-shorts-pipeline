@@ -1,0 +1,11 @@
+{
+  "job_id": "job-mvwdtl20-04cbo1",
+  "producing_run_id": "41201624127",
+  "artifact_name": "draft-job-mvwdtl20-04cbo1",
+  "draft_file": "1793450042.json",
+  "language": "en",
+  "title": "How AI Actually Catches Fake Reviews",
+  "topic": "How AI detects fake reviews",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793450042_en/broll_manifest.json"
+}
