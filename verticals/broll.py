@@ -287,12 +287,22 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
         "credits": _generic_visual_credits(manifest),
         "judge_status": judge_summary.get("judge_status", "disabled"),
         "judge": judge_summary,
+        # Providers that answered 429 / quota during this run (console quota panel).
+        "provider_limits": _provider_limits(),
     }, indent=2), encoding="utf-8")
     (out_dir / "visual_review_required.json").write_text(
         json.dumps({"review_required": review_required}, indent=2), encoding="utf-8"
     )
     log(f"B-roll source manifest saved: {manifest_path}; review_required={review_required}")
     return frames
+
+
+def _provider_limits() -> dict:
+    try:
+        from .visuals import provider_limits
+        return provider_limits()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _generic_visual_credits(manifest: list[dict]) -> str:
@@ -366,6 +376,7 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
     if added:
         data["assets"] = rows
         data["credits"] = _generic_visual_credits(rows)
+        data["provider_limits"] = _provider_limits()
         manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         log(f"Added {added} FLUX frame(s) so no frame appears more than twice")
     return added

@@ -219,7 +219,9 @@ jobs:
           fi
           # Kokoro-82M brand voice; falls back to Edge TTS automatically on any failure.
           python -m verticals produce --draft "$DRAFT" --lang "$LANGUAGE" --voice kokoro
-          CAPTION=$(find "$VERTICALS_HOME/media" -type f -name '*.srt' -print -quit)
+          # `|| true`: under set -euo pipefail a find error (missing dir / unreadable entry) must
+          # reach the explicit "Caption file missing" check below, not kill the step silently.
+          CAPTION=$(find "$VERTICALS_HOME/media" -type f -name '*.srt' -print -quit 2>/dev/null || true)
           if [ -z "$CAPTION" ]; then echo "::error::Caption file missing; blocking draft handoff."; exit 1; fi
           # Safety net: final metadata + burned-in captions after render.
           python scripts/validate_no_personal_names.py --draft "$DRAFT" --captions "$CAPTION"

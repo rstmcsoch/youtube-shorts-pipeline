@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,61 @@ TIMEOUT = (5, 15)
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+# ─────────────────────────────────────────────────────
+# Provider limits (429 / quota): non-fatal, logged once, source skipped
+# ─────────────────────────────────────────────────────
+# The console's quota panel reads "DYPOL_PROVIDER_LIMIT provider=<x>" lines from
+# the job log (same format as Engine A). A provider that answered 429 / quota is
+# skipped for the rest of this run instead of being asked again for every shot.
+PROVIDER_LIMIT_PREFIX = "DYPOL_PROVIDER_LIMIT"
+_LIMIT_WORDS = re.compile(r"quota|rate.?limit|too many requests|daily free allocation|neurons|exceeded", re.I)
+_exhausted = {}
+_exhausted_lock = threading.Lock()
+
+
+def is_limit_response(response):
+    """True for HTTP 429, or a 4xx whose body says quota / rate limit (e.g. the
+    Cloudflare Workers AI daily neuron allocation)."""
+    status = getattr(response, "status_code", 0) or 0
+    if status == 429:
+        return True
+    if 400 <= status < 500 and status not in (401, 404):
+        try:
+            body = response.text[:600]
+        except Exception:  # noqa: BLE001
+            body = ""
+        return bool(_LIMIT_WORDS.search(body or ""))
+    return False
+
+
+def mark_provider_limit(provider, status=None, detail=""):
+    """Record that `provider` hit its limit; logs one DYPOL_PROVIDER_LIMIT line per run."""
+    with _exhausted_lock:
+        if provider in _exhausted:
+            return False
+        _exhausted[provider] = {"status": status, "detail": str(detail)[:120], "at": _now()}
+    extra = f" detail={str(detail)[:120]}" if detail else ""
+    print(f"{PROVIDER_LIMIT_PREFIX} provider={provider} status={status or 'limit'}"
+          f" action=skip_for_rest_of_run{extra}", flush=True)
+    return True
+
+
+def provider_exhausted(provider):
+    with _exhausted_lock:
+        return provider in _exhausted
+
+
+def provider_limits():
+    """{provider: {status, detail, at}} for providers that hit a limit this run."""
+    with _exhausted_lock:
+        return {k: dict(v) for k, v in _exhausted.items()}
+
+
+def reset_provider_limits():
+    with _exhausted_lock:
+        _exhausted.clear()
 
 
 def _tokens(value):
@@ -183,8 +239,13 @@ def _wikimedia_candidates(query):
         "gsrlimit": 8, "prop": "imageinfo", "iiprop": "url|size|extmetadata",
         "iiurlwidth": 1200,
     }
+    if provider_exhausted("wikimedia"):
+        return []
     response = requests.get("https://commons.wikimedia.org/w/api.php", params=params, timeout=TIMEOUT,
                             headers={"User-Agent": "DYPOLCreatorConsole/1.0 (visual asset lookup)"})
+    if is_limit_response(response):
+        mark_provider_limit("wikimedia", response.status_code)
+        return []
     response.raise_for_status()
     pages = response.json().get("query", {}).get("pages", {})
     out = []
@@ -225,12 +286,15 @@ def _pixabay_candidates(query):
         except (OSError, ValueError):
             data = None
     if data is None:
+        if provider_exhausted("pixabay"):
+            return []
         try:
             response = requests.get("https://pixabay.com/api/", params={
                 "key": key, "q": query[:100], "image_type": "photo",
                 "orientation": "vertical", "safesearch": "true", "per_page": 12,
             }, timeout=TIMEOUT)
-            if response.status_code == 429:
+            if is_limit_response(response):
+                mark_provider_limit("pixabay", response.status_code)
                 return []
             response.raise_for_status()
             data = response.json()
@@ -295,12 +359,15 @@ def _cloudflare_generate(prompt, output_path):
     token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
     if not account or not token:
         return None
+    if provider_exhausted("flux"):
+        return None
     url = f"https://api.cloudflare.com/client/v4/accounts/{quote(account, safe='')}/ai/run/@cf/black-forest-labs/flux-1-schnell"
     try:
         response = requests.post(url, headers={"Authorization": f"Bearer {token}"},
                                  json={"prompt": prompt},
                                  timeout=(8, 60))
-        if response.status_code == 429:
+        if is_limit_response(response):
+            mark_provider_limit("flux", response.status_code, "Cloudflare Workers AI")
             return None
         response.raise_for_status()
         data = response.json()
@@ -513,12 +580,15 @@ def _pixabay_video_search(query):
             return json.loads(cache_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
+    if provider_exhausted("pixabay"):
+        return {}
     try:
         response = requests.get("https://pixabay.com/api/videos/", params={
             "key": key, "q": query[:100], "video_type": "film",
             "safesearch": "true", "per_page": 15,
         }, timeout=TIMEOUT)
-        if response.status_code == 429:
+        if is_limit_response(response):
+            mark_provider_limit("pixabay", response.status_code, "videos")
             return {}
         response.raise_for_status()
         data = response.json()
