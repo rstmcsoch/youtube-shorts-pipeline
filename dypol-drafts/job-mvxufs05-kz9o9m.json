@@ -1,0 +1,16 @@
+{
+  "job_id": "job-mvxufs05-kz9o9m",
+  "producing_run_id": "41309617736",
+  "artifact_name": "draft-job-mvxufs05-kz9o9m",
+  "draft_file": "1793538415.json",
+  "language": "en",
+  "title": "How AI Noise Cancellation Actually Works",
+  "topic": "How AI removes background noise from calls",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793538415_en/broll_manifest.json",
+  "contains_synthetic_media": true,
+  "image_providers": [
+    "cloudflare_workers_ai",
+    "pixabay"
+  ]
+}
