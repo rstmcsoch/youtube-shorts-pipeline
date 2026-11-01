@@ -1,21 +1,20 @@
 """Background music — license-verified track selection + ducking.
 
-Music is OFF by default (MUSIC_ENABLED=1 turns it on). Pixabay's public API has
-no music endpoint, so tracks are never fetched automatically: a track is only
-eligible when it sits in music/ AND is listed in music/tracks.json with a
-verified no-attribution license, e.g.
-
-    {"tracks": [{"file": "calm-pulse.mp3", "license": "Pixabay Content License",
-                 "license_url": "https://pixabay.com/service/license-summary/",
-                 "source_url": "https://pixabay.com/music/...", "attribution_required": false,
-                 "verified": true}]}
-
-The chosen track is recorded in the work dir's broll_manifest.json ("audio").
+Music is ON by default (DYPOL_MUSIC_ENABLED / MUSIC_ENABLED = 0 turns it off).
+Source order:
+  1. a track in music/ listed in music/tracks.json with a verified no-attribution
+     license (e.g. Pixabay Content License / CC0), when any exists;
+  2. otherwise the Open Lo-Fi pack (CC0 1.0, https://github.com/btahir/open-lofi):
+     one sha256-pinned track pulled from its release zip at build time (see
+     open_lofi.py). Any download problem -> the Short renders without music.
+The track is chosen deterministically per job. The bed sits DYPOL_MUSIC_GAIN_DB
+(default -26, clamp -28..-24) dB below the voice's integrated loudness, fades in /
+out, and is gently side-chain ducked under speech. The record goes into the work
+dir's broll_manifest.json ("audio.music").
 """
 
 import json
 import os
-import random
 from pathlib import Path
 
 from .log import log
@@ -24,11 +23,12 @@ from .log import log
 MUSIC_DIR = Path(__file__).resolve().parent.parent / "music"
 
 
-ALLOWED_MUSIC_LICENSES = {"pixabay content license", "pixabay license", "cc0", "public domain"}
+ALLOWED_MUSIC_LICENSES = {"pixabay content license", "pixabay license", "cc0", "cc0-1.0", "public domain"}
 
 
 def music_enabled() -> bool:
-    return os.environ.get("MUSIC_ENABLED", "0").strip() == "1"
+    from .open_lofi import music_enabled as _enabled
+    return _enabled()
 
 
 def verified_tracks(music_dir: Path | None = None) -> list[dict]:
@@ -128,6 +128,24 @@ def _regions_from_words(words: list[dict]) -> list[tuple[float, float]]:
     return regions
 
 
+def _measure_lufs(path) -> float | None:
+    """Integrated loudness of an audio file (first 120 s), or None."""
+    import subprocess
+    try:
+        from .assemble import _parse_loudnorm_json
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-t", "120", "-i", str(path),
+                            "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+                           capture_output=True, text=True, timeout=120)
+        data = _parse_loudnorm_json((r.stderr or "") + (r.stdout or ""))
+        return float(data["input_i"]) if data else None
+    except Exception:  # noqa: BLE001 - measuring is best effort
+        return None
+
+
+def _job_key(work_dir: Path) -> str:
+    return os.environ.get("DYPOL_JOB_ID", "").strip() or Path(work_dir).name
+
+
 def select_and_prepare_music(
     voiceover_path: Path,
     work_dir: Path,
@@ -135,29 +153,32 @@ def select_and_prepare_music(
     duck_gap: float = 0.25,
     words: list[dict] | None = None,
 ) -> dict:
-    """Select a license-verified track (only when MUSIC_ENABLED=1).
+    """Pick this job's music bed (on by default; never fatal).
 
-    Returns dict with track_path, duck_filter (legacy), gain_db and the track's
-    license record. `words` (Whisper timestamps from captions) avoids running
-    Whisper a second time.
+    Returns dict with track_path, duck_filter (legacy), gain_db (the volume applied
+    to the track so the bed sits the target level below the voice) and the track's
+    license record; {} = render without music. `words` (Whisper timestamps from
+    captions) avoids running Whisper a second time.
     """
+    from . import open_lofi
     if not music_enabled():
-        log("Background music disabled (MUSIC_ENABLED != 1)")
+        log("Background music disabled (DYPOL_MUSIC_ENABLED=0)")
         return {}
+    target_db = open_lofi.music_gain_db()
     tracks = verified_tracks()
-    if not tracks:
-        log("No license-verified tracks in music/tracks.json — skipping background music")
-        return {}
-
-    chosen = random.choice(tracks)
+    if tracks:
+        chosen = tracks[int(open_lofi.hashlib.sha256(_job_key(work_dir).encode()).hexdigest()[:12], 16)
+                        % len(tracks)]
+        chosen = {**chosen, "provider": chosen.get("provider") or "local_verified"}
+    else:
+        chosen = open_lofi.fetch_track(_job_key(work_dir), log=log)
+        if not chosen:
+            return {}
     track = Path(chosen["path"])
-    log(f"Selected music track: {track.name} ({chosen.get('license')})")
-    try:
-        gain_db = float(os.environ.get("MUSIC_GAIN_DB", "-22"))
-    except ValueError:
-        gain_db = -22.0
-    gain_db = min(-20.0, max(-24.0, gain_db))
-    _record_music(work_dir, chosen, gain_db)
+    gain_db = open_lofi.relative_gain_db(_measure_lufs(voiceover_path), _measure_lufs(track), target_db)
+    log(f"Selected music track: {track.name} ({chosen.get('license')}); bed {target_db:g} dB under the voice "
+        f"(track volume {gain_db:g} dB)")
+    _record_music(work_dir, chosen, gain_db, target_db)
 
     # Get speech regions for ducking
     speech_regions = _regions_from_words(words) if words else _get_speech_regions(voiceover_path)
@@ -168,12 +189,13 @@ def select_and_prepare_music(
         "track_path": str(track),
         "duck_filter": duck_filter,
         "gain_db": gain_db,
+        "relative_db": target_db,
         "license": chosen.get("license", ""),
         "source_url": chosen.get("source_url", ""),
     }
 
 
-def _record_music(work_dir: Path, track: dict, gain_db: float) -> None:
+def _record_music(work_dir: Path, track: dict, gain_db: float, relative_db: float | None = None) -> None:
     manifest = Path(work_dir) / "broll_manifest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -181,9 +203,12 @@ def _record_music(work_dir: Path, track: dict, gain_db: float) -> None:
         data = {}
     audio = data.get("audio") or {}
     audio["music"] = {
+        "provider": track.get("provider", ""), "sha256": track.get("sha256", ""),
+        "relative_db": relative_db,
         "file": Path(track["path"]).name, "license": track.get("license", ""),
         "license_url": track.get("license_url", ""), "source_url": track.get("source_url", ""),
-        "attribution_required": False, "gain_db": gain_db, "ducking": "sidechaincompress",
+        "attribution_required": False, "gain_db": gain_db,
+        "ducking": "sidechaincompress ratio 2 under speech, 1.5 s fade in / out",
     }
     data["audio"] = audio
     try:

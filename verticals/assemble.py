@@ -141,9 +141,10 @@ def music_filter_graph(duration: float, music_gain_db: float = -22.0) -> str:
     """Voice [1:a] + music [2:a]; music is ducked under the voice with sidechaincompress."""
     return (
         f"[2:a]atrim=0:{duration:.3f},asetpts=N/SR/TB,volume={music_gain_db}dB,"
-        f"afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5[bed];"
+        f"afade=t=in:d=1.5,afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5[bed];"
         f"[1:a]asplit=2[voice][sc];"
-        f"[bed][sc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=350[ducked];"
+        # Gentle duck: the bed is already ~26 dB under the voice, so it stays audible.
+        f"[bed][sc]sidechaincompress=threshold=0.05:ratio=2:attack=20:release=350[ducked];"
         f"[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
     )
 

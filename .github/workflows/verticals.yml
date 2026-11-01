@@ -106,7 +106,10 @@ jobs:
       KOKORO_MODEL_DIR: ${{ github.workspace }}/.kokoro-cache
       KOKORO_VOICE: ${{ vars.KOKORO_VOICE || 'af_heart' }}
       KOKORO_SPEED: ${{ vars.KOKORO_SPEED || '1.08' }}
-      MUSIC_ENABLED: ${{ vars.MUSIC_ENABLED || '0' }}
+      # Quiet Open Lo-Fi (CC0) music under the voice; set repo variable to 0 to turn off.
+      MUSIC_ENABLED: ${{ vars.MUSIC_ENABLED || '1' }}
+      DYPOL_MUSIC_GAIN_DB: ${{ vars.DYPOL_MUSIC_GAIN_DB || '-26' }}
+      DYPOL_MUSIC_CACHE: ${{ github.workspace }}/.dypol-music-cache
       REVIEWER_FEEDBACK: ${{ inputs.reviewer_feedback || '' }}
       # Unbuffered output: per-stage timings in the log line up with real time.
       PYTHONUNBUFFERED: '1'
@@ -121,6 +124,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Cache background music (Open Lo-Fi CC0 tracks)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.dypol-music-cache
+          key: dypol-music-open-lofi-v1.0.0
 
       # Speed: the old setup-python pip cache restored ~3.5 GB (~40 s) and then still
       # spent ~50 s in pip install. Caching the installed virtualenv skips both on a hit.

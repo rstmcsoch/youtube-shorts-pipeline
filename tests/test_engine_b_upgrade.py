@@ -423,11 +423,15 @@ class TestAudio:
         assert _parse_loudnorm_json("nothing") is None
 
     def test_music_graph_ducks_with_sidechain(self):
-        g = music_filter_graph(60.0, -22)
-        assert "sidechaincompress" in g and "volume=-22dB" in g and "[1:a]asplit=2" in g
+        g = music_filter_graph(60.0, -32)
+        assert "sidechaincompress" in g and "volume=-32dB" in g and "[1:a]asplit=2" in g
+        assert "afade=t=in" in g and "afade=t=out" in g and "ratio=2" in g
 
-    def test_music_disabled_by_default(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("MUSIC_ENABLED", raising=False)
+    def test_music_can_be_switched_off(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("DYPOL_MUSIC_ENABLED", "0")
+        assert music.select_and_prepare_music(tmp_path / "v.wav", tmp_path) == {}
+        monkeypatch.delenv("DYPOL_MUSIC_ENABLED")
+        monkeypatch.setenv("MUSIC_ENABLED", "0")
         assert music.select_and_prepare_music(tmp_path / "v.wav", tmp_path) == {}
 
     def test_only_verified_no_attribution_tracks(self, tmp_path):
@@ -444,7 +448,8 @@ class TestAudio:
         assert [Path(t["path"]).name for t in music.verified_tracks(tmp_path)] == ["ok.mp3"]
 
     def test_music_recorded_in_manifest(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("MUSIC_ENABLED", "1")
+        monkeypatch.setenv("DYPOL_MUSIC_ENABLED", "1")
+        monkeypatch.setattr(music, "_measure_lufs", lambda p: None)
         (tmp_path / "bed.mp3").write_bytes(b"x")
         (tmp_path / "tracks.json").write_text(json.dumps({"tracks": [
             {"file": "bed.mp3", "license": "Pixabay Content License", "verified": True,
@@ -454,7 +459,7 @@ class TestAudio:
         work.mkdir()
         (work / "broll_manifest.json").write_text(json.dumps({"assets": []}))
         r = music.select_and_prepare_music(work / "v.wav", work, words=[{"word": "a", "start": 0, "end": 1}])
-        assert -24 <= r["gain_db"] <= -20
+        assert -28 <= r["gain_db"] <= -24  # unmeasurable -> the target level itself
         rec = json.loads((work / "broll_manifest.json").read_text())["audio"]["music"]
         assert rec["license"] == "Pixabay Content License" and rec["attribution_required"] is False
 
