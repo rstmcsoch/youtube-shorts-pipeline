@@ -1,7 +1,7 @@
 """YouTube altered/synthetic-content disclosure (status.containsSyntheticMedia).
 
 A video is declared as containing synthetic media when its b-roll manifest
-includes any AI-generated asset (FLUX on Cloudflare Workers AI, Gemini images,
+includes any AI-generated asset (FLUX on Cloudflare Workers AI or NVIDIA, Gemini images,
 or anything tagged "ai-generated"). YOUTUBE_CONTAINS_SYNTHETIC_MEDIA
 (auto|true|false, default auto) overrides the detection.
 
@@ -18,7 +18,7 @@ from pathlib import Path
 SYNTHETIC_MEDIA_ENV = "YOUTUBE_CONTAINS_SYNTHETIC_MEDIA"
 SYNTHETIC_MEDIA_MODES = ("auto", "true", "false")
 # Lower-cased substrings matched against provider / asset_id / license.
-AI_ASSET_MARKERS = ("flux", "cloudflare", "ai-generated", "ai_generated", "ai generated", "gemini")
+AI_ASSET_MARKERS = ("flux", "cloudflare", "nvidia_flux", "ai-generated", "ai_generated", "ai generated", "gemini")
 
 
 def _is_ai_asset(entry: dict) -> bool:

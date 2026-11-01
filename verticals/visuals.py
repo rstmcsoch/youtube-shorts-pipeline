@@ -77,6 +77,10 @@ def provider_limits():
 def reset_provider_limits():
     with _exhausted_lock:
         _exhausted.clear()
+    try:
+        reset_nvidia_state()
+    except NameError:  # defined further down at import time
+        pass
 
 
 def _tokens(value):
@@ -388,6 +392,131 @@ def _cloudflare_generate(prompt, output_path):
         return None
 
 
+# ─────────────────────────────────────────────────────
+# NVIDIA hosted FLUX.1-schnell: fallback used ONLY after Cloudflare Workers AI
+# FLUX hit its daily limit (provider "flux" exhausted). Same brand/text-free
+# prompt; the stills go through the same post-render contact-sheet judge.
+# Docs: https://docs.api.nvidia.com/nim/reference/black-forest-labs-flux_1-schnell-infer
+# Request {prompt, width, height, seed, steps<=4}; response {"artifacts": [{"base64",
+# "finishReason", "seed"}]} (JPEG). Free tier ~40 requests/min -> throttled.
+# ─────────────────────────────────────────────────────
+NVIDIA_FLUX_URL = "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell"
+NVIDIA_FLUX_PROVIDER = "nvidia_flux"
+NVIDIA_FLUX_SOURCE_URL = "https://build.nvidia.com/black-forest-labs/flux_1-schnell"
+NVIDIA_FLUX_LICENSE = "AI-generated with FLUX.1 [schnell] (Apache-2.0 model) on NVIDIA hosted NIM API"
+NVIDIA_FLUX_LICENSE_URL = "https://huggingface.co/black-forest-labs/FLUX.1-schnell"
+AI_IMAGE_PROVIDERS = ("cloudflare_workers_ai", NVIDIA_FLUX_PROVIDER)
+_nvidia_state = {"last": 0.0, "square_only": False, "disabled": ""}
+_nvidia_lock = threading.Lock()
+
+
+def _env_on(name, default="1"):
+    return str(os.environ.get(name, default) or default).strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def nvidia_flux_available():
+    """True only after Cloudflare FLUX hit its limit this run, with a key set, the
+    fallback enabled (DYPOL_NVIDIA_FLUX_ENABLED, default on) and NVIDIA not exhausted."""
+    return (provider_exhausted("flux") and not provider_exhausted(NVIDIA_FLUX_PROVIDER)
+            and not _nvidia_state["disabled"] and _env_on("DYPOL_NVIDIA_FLUX_ENABLED")
+            and bool(os.environ.get("NVIDIA_API_KEY", "").strip()))
+
+
+def reset_nvidia_state():
+    _nvidia_state.update({"last": 0.0, "square_only": False, "disabled": ""})
+
+
+def _nvidia_throttle():
+    try:
+        interval = float(os.environ.get("DYPOL_NVIDIA_FLUX_MIN_INTERVAL", "1.6"))
+    except ValueError:
+        interval = 1.6
+    with _nvidia_lock:  # b-roll segments are fetched in parallel threads
+        wait = _nvidia_state["last"] + max(0.0, interval) - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _nvidia_state["last"] = time.monotonic()
+
+
+def _nvidia_image_b64(data):
+    if not isinstance(data, dict):
+        return None
+    for art in data.get("artifacts") or []:
+        if isinstance(art, dict) and art.get("base64"):
+            if str(art.get("finishReason") or "SUCCESS").upper() not in ("SUCCESS", "STOP", ""):
+                return None  # e.g. CONTENT_FILTERED
+            return art["base64"]
+    if data.get("image"):
+        return data["image"]
+    for item in data.get("data") or []:
+        if isinstance(item, dict) and (item.get("b64_json") or item.get("image")):
+            return item.get("b64_json") or item.get("image")
+    return None
+
+
+def _nvidia_flux_generate(prompt, output_path, seed=0):
+    """Portrait NVIDIA FLUX still -> manifest dict or None. Never raises. 429 / quota ->
+    one DYPOL_PROVIDER_LIMIT provider=nvidia_flux line, then the caller's stock /
+    gradient path."""
+    key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if not key or not nvidia_flux_available():
+        return None
+    import base64
+    size = (1024, 1024) if _nvidia_state["square_only"] else (768, 1344)
+    for attempt in range(2):
+        body = {"prompt": prompt, "width": size[0], "height": size[1],
+                "seed": int(seed or 0) % 2147483647, "steps": 4}
+        _nvidia_throttle()
+        try:
+            response = requests.post(NVIDIA_FLUX_URL, json=body, timeout=(8, 90), headers={
+                "Authorization": f"Bearer {key}", "Accept": "application/json"})
+        except requests.RequestException as exc:
+            print(f"NVIDIA FLUX request failed: {exc}", flush=True)
+            return None
+        status = getattr(response, "status_code", 0)
+        if status == 200:
+            try:
+                b64 = _nvidia_image_b64(response.json())
+                if not b64:
+                    return None
+                Path(output_path).write_bytes(base64.b64decode(b64))
+                with Image.open(output_path) as im:
+                    im.verify()
+                with Image.open(output_path) as im:
+                    im.convert("RGB").save(output_path, format="PNG")
+            except (ValueError, TypeError, OSError):
+                Path(output_path).unlink(missing_ok=True)
+                return None
+            return {
+                "provider": NVIDIA_FLUX_PROVIDER, "source_url": NVIDIA_FLUX_SOURCE_URL,
+                "asset_id": "flux.1-schnell", "license": NVIDIA_FLUX_LICENSE,
+                "license_url": NVIDIA_FLUX_LICENSE_URL, "fallback_for": "cloudflare_workers_ai",
+                "retrieved_at": _now(), "sha256": hashlib.sha256(Path(output_path).read_bytes()).hexdigest(),
+            }
+        if is_limit_response(response):
+            mark_provider_limit(NVIDIA_FLUX_PROVIDER, status, "NVIDIA hosted FLUX.1-schnell")
+            return None
+        if status in (400, 422) and size != (1024, 1024) and attempt == 0:
+            _nvidia_state["square_only"] = True  # hosted endpoint only accepts 1024x1024
+            size = (1024, 1024)
+            continue
+        if status in (401, 403, 404):
+            _nvidia_state["disabled"] = f"HTTP {status}"
+            print(f"NVIDIA FLUX unavailable (HTTP {status}); not trying it again this run", flush=True)
+            return None
+        print(f"NVIDIA FLUX request failed: HTTP {status}", flush=True)
+        return None
+    return None
+
+
+def _ai_generate(prompt, output_path, seed=0):
+    """AI still: Cloudflare Workers AI FLUX; only once its limit is hit, NVIDIA FLUX."""
+    meta = _cloudflare_generate(prompt, output_path)
+    if meta is None and nvidia_flux_available():
+        meta = _nvidia_flux_generate(prompt, output_path, seed=seed)
+    return meta
+
+
 def _judge():
     """The run's visual judge, or None when unavailable (the judge never blocks the pipeline)."""
     try:
@@ -544,7 +673,8 @@ def select_visual(intent, output_path, used_hashes=None, ctx=None):
             meta["judge"] = {"decision": "not_judged", "needs_review": True,
                              "review_reason": f"{judge_reason}; used {meta.get('provider')} fallback"}
         return meta
-    ai = _cloudflare_generate(flux_prompt(intent), output_path)
+    ai = _ai_generate(flux_prompt(intent), output_path,
+                      seed=int(hashlib.sha256(str(output_path).encode()).hexdigest()[:8], 16))
     if ai:
         digest = ai["sha256"]
         if digest not in used_hashes:

@@ -87,8 +87,12 @@ def _apply_visual_manifest(draft, draft_path, manifest_path):
     if visual_manifest.get("judge_status"):
         draft["visual_judge_status"] = visual_manifest["judge_status"]
         draft["visual_review_reasons"] = list(visual_manifest.get("review_reasons") or [])
-    from .synthetic_media import manifest_has_ai_asset
+    from .synthetic_media import manifest_has_ai_asset, resolve_contains_synthetic_media
     draft["contains_ai_visuals"] = manifest_has_ai_asset(visual_manifest)
+    # The exact status.containsSyntheticMedia the publish step will send (draft metadata).
+    draft["contains_synthetic_media"] = resolve_contains_synthetic_media(draft)
+    draft["image_providers"] = sorted({str(a.get("provider")) for a in visual_manifest.get("assets") or []
+                                       if isinstance(a, dict) and a.get("provider")})
     draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
 
 

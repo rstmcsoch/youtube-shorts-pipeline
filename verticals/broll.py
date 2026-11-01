@@ -267,6 +267,7 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
             "clip": clip_meta,
             "judge_status": judge.status if judge is not None else "disabled",
             **({"judge": metadata["judge"]} if metadata.get("judge") else {}),
+            **({"fallback_for": metadata["fallback_for"]} if metadata.get("fallback_for") else {}),
         })
 
     judge_summary = _judge_block(judge)
@@ -314,7 +315,7 @@ def _generic_visual_credits(manifest: list[dict]) -> str:
         labels.append("Pixabay")
     if "wikimedia_commons" in providers:
         labels.append("Wikimedia Commons (public domain)")
-    if "cloudflare_workers_ai" in providers:
+    if "cloudflare_workers_ai" in providers or "nvidia_flux" in providers:
         labels.append("AI-generated (FLUX)")
     if "gemini" in providers:
         labels.append("AI-generated")
@@ -325,7 +326,7 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
     """Add FLUX frames when the manifest cannot fill `shots_needed` shots under the
     reuse caps (third-party once, AI/original twice). Never exceeds MAX_AI_FRAMES
     FLUX frames in total. Returns the number of frames added."""
-    from .visuals import _cloudflare_generate, flux_prompt
+    from .visuals import _ai_generate, flux_prompt, AI_IMAGE_PROVIDERS
 
     out_dir = Path(out_dir)
     manifest_path = out_dir / "broll_manifest.json"
@@ -339,7 +340,7 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
         capacity += row.get("max_uses") or max_uses_for(row.get("provider", ""))
         if (row.get("clip") or {}).get("file") and (out_dir / row["clip"]["file"]).exists():
             capacity += 1
-    ai_count = sum(1 for r in rows if r.get("provider") == "cloudflare_workers_ai")
+    ai_count = sum(1 for r in rows if r.get("provider") in AI_IMAGE_PROVIDERS)
     added = 0
     attempts = 0
     segments = [r for r in rows if r.get("intent")] or [{"intent": {"keywords": ["technology hardware"]}, "segment_index": 0}]
@@ -354,9 +355,9 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
         intent = dict(base.get("intent") or {})
         variant = 1 + ai_count + added
         out_path = out_dir / f"broll_extra_{len(rows)}.png"
-        meta = _cloudflare_generate(flux_prompt(intent, variant=variant), out_path)
+        meta = _ai_generate(flux_prompt(intent, variant=variant), out_path, seed=variant + len(rows))
         if not meta:
-            break  # FLUX unavailable / rate limited: gradients fill the gap
+            break  # FLUX (Cloudflare and NVIDIA) unavailable / rate limited: gradients fill the gap
         try:
             _save_portrait(out_path)
             meta["sha256"] = __import__("hashlib").sha256(out_path.read_bytes()).hexdigest()
@@ -367,6 +368,7 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
             "frame": out_path.name, "segment": base.get("segment", ""), "intent": base.get("intent"),
             **{k: meta.get(k, "") for k in ("provider", "source_url", "asset_id", "license", "license_url",
                                            "retrieved_at", "sha256")},
+            **({"fallback_for": meta["fallback_for"]} if meta.get("fallback_for") else {}),
             "relevance_score": None, "max_shot_seconds": None, "max_uses": 2,
             "segment_index": base.get("segment_index", 0), "clip": None, "top_up": True,
         })

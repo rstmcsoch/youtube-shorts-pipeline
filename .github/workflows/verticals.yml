@@ -95,6 +95,8 @@ jobs:
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # NVIDIA hosted FLUX.1-schnell: used only after Cloudflare FLUX hits its daily limit.
+      DYPOL_NVIDIA_FLUX_ENABLED: ${{ vars.DYPOL_NVIDIA_FLUX_ENABLED || '1' }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       DYPOL_JOB_ID: ${{ inputs.job_id || github.run_id }}
       TOPIC: ${{ inputs.topic || '' }}
@@ -252,6 +254,9 @@ jobs:
               "topic": draft.get("news", ""),
               "review_required": bool(draft.get("review_required", True)),
               "visual_manifest": draft.get("broll_manifest", ""),
+              # status.containsSyntheticMedia the publish step will send + who made the stills.
+              "contains_synthetic_media": bool(draft.get("contains_synthetic_media", False)),
+              "image_providers": draft.get("image_providers", []),
           }
           with open(f"dypol-drafts/{job_id}.json", "w", encoding="utf-8") as f:
               json.dump(snapshot, f, indent=2)
