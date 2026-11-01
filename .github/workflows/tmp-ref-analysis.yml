@@ -1,0 +1,62 @@
+name: TEMP reference analysis (delete me)
+on:
+  push:
+    branches: [dypol-integration]
+    paths: ['.github/workflows/tmp-ref-analysis.yml']
+  workflow_dispatch:
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: ref_L1, vid: yksrd5uNxcw, kind: long}
+          - {id: ref_L2, vid: qbN559fQn7k, kind: long}
+          - {id: ref_L3, vid: pW2ktrJlsyE, kind: long}
+          - {id: ref_L4, vid: XaYubuLtW8M, kind: long}
+          - {id: ref_S1, vid: OSbjezrUuP0, kind: short}
+          - {id: ref_S2, vid: kMpTBy3g1N0, kind: short}
+          - {id: ref_S3, vid: EqMxcTvJorQ, kind: short}
+          - {id: ref_S4, vid: 0sI-GTYetD8, kind: short}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: dypol-integration, sparse-checkout: tmp_ref}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - uses: denoland/setup-deno@v2
+        with: {deno-version: v2.x}
+      - name: deps
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+          pip install -q --pre -U "yt-dlp[default]" "scenedetect[opencv-headless]" librosa pillow numpy
+      - name: download
+        run: |
+          mkdir -p media out
+          URL="https://www.youtube.com/watch?v=${{ matrix.vid }}"
+          ok=0
+          for client in "default" "tv,web_safari" "mweb" "android_vr" "ios"; do
+            echo "== client $client"
+            yt-dlp --extractor-args "youtube:player_client=$client" -f "bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]" \
+              --merge-output-format mp4 --write-info-json --no-playlist -o "media/${{ matrix.id }}.%(ext)s" "$URL" 2>&1 | tail -5 && [ -f "media/${{ matrix.id }}.mp4" ] && ok=1 && break
+          done
+          ls -la media
+          echo "download_ok=$ok" | tee out/${{ matrix.id }}.download.txt
+          [ "$ok" = 1 ]
+      - name: analyse
+        run: |
+          python tmp_ref/analyze_reference.py measure media/${{ matrix.id }}.mp4 --id ${{ matrix.id }} --kind ${{ matrix.kind }} --out out --info media/${{ matrix.id }}.info.json
+          python - <<'PY'
+          import json
+          i=json.load(open('media/${{ matrix.id }}.info.json'))
+          keep={k:i.get(k) for k in ['id','duration','view_count','like_count','upload_date','chapters','width','height','fps','tags','categories']}
+          keep['description_len']=len(i.get('description') or '')
+          json.dump(keep,open('out/${{ matrix.id }}.info.slim.json','w'),indent=1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.id }}
+          path: out/
+          retention-days: 1
