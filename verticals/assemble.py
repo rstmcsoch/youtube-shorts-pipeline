@@ -102,9 +102,12 @@ def build_sources(frames: list[Path], out_dir: Path, beats: list | None = None) 
         seg = row.get("segment_index", i)
         clip = row.get("clip") or {}
         if clip.get("file") and (out_dir / clip["file"]).exists():
-            sources.append({"path": out_dir / clip["file"], "kind": "clip", "provider": clip.get("provider", "pixabay_video"),
-                            "segment": seg, "max_uses": 1,
-                            "max_len": float(clip.get("duration_seconds") or SHOT_TARGET_SECONDS)})
+            clip_src = {"path": out_dir / clip["file"], "kind": "clip", "provider": clip.get("provider", "pixabay_video"),
+                        "segment": seg, "max_uses": 1,
+                        "max_len": float(clip.get("duration_seconds") or SHOT_TARGET_SECONDS)}
+            if seg in motion_segments:  # a motion beat owns this segment; stock is only a backup
+                clip_src["backup"] = True
+            sources.append(clip_src)
         provider = row.get("provider", "")
         still = {"path": path, "kind": "still", "provider": provider, "segment": seg,
                  "max_uses": int(row.get("max_uses") or max_uses_for(provider)),
@@ -163,6 +166,24 @@ def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET
         prev = best
         shots.append({"source": best, "duration": lengths[k], "effect": effect, "variant": variant})
     return shots
+
+
+MAX_SHOT_SECONDS = 8.0
+
+
+def shot_count(sources: list[dict], duration: float, target: float = SHOT_TARGET_SECONDS,
+               max_len: float = MAX_SHOT_SECONDS) -> int:
+    """How many source shots a beat-driven video gets.
+
+    One per primary (non-backup) source, so every beat shows once and the planner
+    never runs out and fills the tail with backup stills (the first real draft ended
+    on 4 off-topic stills). Never more than duration / target, never fewer than
+    duration / max_len: long shots are split into 2-4 s sub-shots by pacing anyway.
+    """
+    primaries = sum(1 for s in sources if not s.get("backup"))
+    default = max(1, math.ceil(duration / target - 1e-6))
+    floor = max(1, math.ceil(duration / max_len - 1e-6))
+    return max(floor, min(default, primaries or default))
 
 
 def shot_capacity(sources: list[dict]) -> int:
@@ -354,7 +375,8 @@ def assemble_video(
         from .beats import normalize_beats
         beats = normalize_beats(beats, n_segments=len(beats))[0]
     sources = build_sources(frames, out_dir, beats)
-    groups = shot_groups(duration, words, SHOT_TARGET_SECONDS, fps=FPS)
+    groups = shot_groups(duration, words, SHOT_TARGET_SECONDS, fps=FPS,
+                         n_shots=shot_count(sources, duration) if beats else None)
     plan = plan_shots(sources, duration, durations=[sum(g) for g in groups])
     for shot, cuts in zip(plan, groups):
         shot["cuts"] = cuts

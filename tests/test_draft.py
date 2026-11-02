@@ -109,7 +109,8 @@ class TestHookAndLength:
         mock_llm.side_effect = [short, good]
         draft = generate_draft("Test")
         assert len(draft["script"].split()) == 140
-        assert "LENGTH CORRECTION" in mock_llm.call_args[0][0]
+        # call 2 is the length rewrite; a hook rewrite (no number in "word word ...") may follow
+        assert "LENGTH CORRECTION" in mock_llm.call_args_list[1][0][0]
 
     @patch("verticals.draft.research_topic")
     @patch("verticals.draft.call_llm")

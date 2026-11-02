@@ -23,7 +23,10 @@ SFX_DIR = Path(__file__).resolve().parent.parent / "sfx"
 SR = 48000
 UNDER_VOICE_DB = 12.0
 PER_MIN = (6, 12)
-TRANSITION_GAIN = {"whoosh": 0.0, "pop": -2.0, "riser": -3.0, "impact": 2.0, "click": -9.0}
+# Relative to the bed level (peaks UNDER_VOICE_DB under the voice peak). The first real
+# draft measured whooshes only ~9 dB under the voice RMS (style guide: ~-18 dB), loud in
+# pauses, so transitions sit 6 dB lower; the hook impact stays the loudest event.
+TRANSITION_GAIN = {"whoosh": -6.0, "pop": -7.0, "riser": -8.0, "impact": -2.0, "click": -9.0}
 
 
 def enabled() -> bool:

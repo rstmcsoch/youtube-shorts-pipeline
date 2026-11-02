@@ -18,6 +18,9 @@ from .style import block_kinds, block_limits, hook_rules, max_same_run, load_sty
 STOCK = "stock_or_ai_still"
 CTA_RE = re.compile(r"\b(subscribe|follow (us|me|for more)|like and|hit the (like|bell)|smash|comment below|"
                     r"turn on notifications|link in (the )?bio)\b", re.I)
+# setup phrases that delay the hook (first real draft opened "Let me explain how ... in sixty seconds")
+INTRO_RE = re.compile(r"\b(let me (explain|show|tell|break)|let's (talk|dive|explore|break)|in (the next )?"
+                      r"(\d+|thirty|forty|fifty|sixty|ninety) seconds|in this (video|short)|stick around)\b", re.I)
 NUMBER_RE = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|billion|"
                        r"percent|half|double|twice|triple)\b", re.I)
 
@@ -155,7 +158,8 @@ def hook_warnings(script: str) -> list[str]:
     by_number = words[: max(1, int(rules.get("number_by_s", 8) * wpm / 60))]
     if not NUMBER_RE.search(" ".join(by_number)):
         out.append(f"hook: no concrete number in the first ~{rules.get('number_by_s', 8):g} s")
-    if re.match(r"(hey|hi|hello|welcome|what's up|in this video|today we)", " ".join(words[:4]), re.I):
+    if re.match(r"(hey|hi|hello|welcome|what's up|in this video|today we)", " ".join(words[:4]), re.I) \
+            or INTRO_RE.search(" ".join(words[:14])):
         out.append("hook: script opens with an intro/greeting")
     if rules.get("no_end_cta", True):
         tail = " ".join(words[-25:])

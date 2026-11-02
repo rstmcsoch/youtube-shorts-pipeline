@@ -95,7 +95,7 @@ def _generate_json_response(prompt: str, provider: str | None) -> dict:
             ) from second_error
 
 
-SCRIPT_MIN_WORDS = 115  # ≈47-50 s (Kokoro ≈2.3-2.4 words/s incl. pauses)
+SCRIPT_MIN_WORDS = 135  # ≈50 s at the measured ~158 WPM (style guide: 50-65 s Shorts)
 SCRIPT_MAX_WORDS = 170  # ≈72 s
 
 
@@ -132,6 +132,42 @@ def _enforce_script_length(draft: dict, prompt: str, provider: str | None) -> di
         log(f"Length-corrected rewrite failed ({exc}); keeping the original draft.")
         return draft
     if isinstance(retry, dict) and retry.get("script") and not script_length_problem(retry.get("script", "")):
+        return retry
+    return draft
+
+
+def _hook_problems(script: str) -> list[str]:
+    from .beats import hook_warnings
+    return [w for w in hook_warnings(script) if w.startswith("hook:")]
+
+
+def _enforce_hook(draft: dict, prompt: str, provider: str | None) -> dict:
+    """One corrective rewrite when the hook has no number by ~8 s or opens with setup.
+
+    The prompt already asks for both, but the first real draft still opened with
+    "Let me explain how ... in sixty seconds" and no number. Keeps the original when
+    the rewrite fails, is the wrong length, or is not better.
+    """
+    script = str(draft.get("script", ""))
+    problems = _hook_problems(script)
+    if not problems or len(script.split()) < 40:
+        return draft
+    log(f"Draft hook problems ({'; '.join(problems)}); requesting one hook rewrite.")
+    fix = (
+        prompt + "\n\nHOOK CORRECTION: your previous script started: \"" + " ".join(script.split()[:30]) + "...\". "
+        "Problems: " + "; ".join(problems) + ". Rewrite ONLY the opening so sentence 1 (at most 12 words) is the "
+        "most surprising concrete fact, and a real, checkable number (a figure, percentage, year or count from the "
+        "research) is spoken within the first 20 words. No setup such as 'let me explain', 'in sixty seconds', "
+        "'most people get this wrong'. Keep the rest of the script, the beats and the length, and return the "
+        "complete JSON object again."
+    )
+    try:
+        retry = _generate_json_response(fix, provider)
+    except Exception as exc:
+        log(f"Hook rewrite failed ({exc}); keeping the original draft.")
+        return draft
+    if (isinstance(retry, dict) and retry.get("script") and not script_length_problem(retry.get("script", ""))
+            and len(_hook_problems(retry["script"])) < len(problems)):
         return retry
     return draft
 
@@ -425,5 +461,5 @@ Output JSON exactly:
         return draft
 
     draft = _generate_json_response(prompt, provider)
-    draft = finalize(_enforce_script_length(draft, prompt, provider))
+    draft = finalize(_enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider))
     return _enforce_no_personal_names(draft, prompt, provider, finalize)

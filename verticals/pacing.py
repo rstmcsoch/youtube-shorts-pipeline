@@ -85,16 +85,29 @@ def group_cuts(seg_lengths: list[float], n_shots: int) -> list[list[float]]:
     """Pack consecutive segments into n_shots source shots (1+ segments each, in order)."""
     s = len(seg_lengths)
     n = max(1, min(int(n_shots), s))
-    groups = [[] for _ in range(n)]
-    for i, length in enumerate(seg_lengths):
-        groups[min(n - 1, i * n // s)].append(length)
-    return [g for g in groups if g]
+    total = float(sum(seg_lengths)) or 1.0
+    prefix = [0.0]
+    for length in seg_lengths:
+        prefix.append(prefix[-1] + length)
+    # by time, not by count: each shot boundary goes to the segment boundary nearest
+    # k * total / n, so shots come out near-equal (count packing made 8 s + 1.7 s shots)
+    cuts, prev = [0], 0
+    for k in range(1, n):
+        lo, hi = prev + 1, s - (n - k)
+        j = min(range(lo, hi + 1), key=lambda b: (abs(prefix[b] - k * total / n), b))
+        cuts.append(j)
+        prev = j
+    cuts.append(s)
+    return [list(seg_lengths[a:b]) for a, b in zip(cuts, cuts[1:]) if b > a]
 
 
-def shot_groups(duration: float, words: list[dict] | None, shot_target: float, fps: int = 30) -> list[list[float]]:
-    """Source shots (same count the old fixed-length planner made), each a list of sub-shot lengths."""
+def shot_groups(duration: float, words: list[dict] | None, shot_target: float, fps: int = 30,
+                n_shots: int | None = None) -> list[list[float]]:
+    """Source shots, each a list of sub-shot lengths. By default as many shots as the old
+    fixed-length planner made (duration / shot_target); `n_shots` overrides that."""
     segs = segments(cut_points(duration, words, fps=fps))
-    n_shots = max(1, math.ceil(duration / shot_target - 1e-6))
+    if not n_shots:
+        n_shots = max(1, math.ceil(duration / shot_target - 1e-6))
     return group_cuts(segs, n_shots)
 
 

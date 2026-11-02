@@ -349,6 +349,34 @@ def _chunk_font_size(text: str, size: int, max_width: int, min_size: int, outlin
         return size
 
 
+FIT_SHRINK_MAX = 16   # a chunk may shrink this much below cfg size; past that it is split
+
+
+def fit_caption_chunks(chunks: list[list[dict]], cfg: dict | None = None) -> list[list[dict]]:
+    """Split chunks that would have to shrink a lot to fit the safe band.
+
+    The first real draft set 4-word chunks with long words at 76 vs 112 elsewhere,
+    so caption size jumped around. A chunk that needs more than FIT_SHRINK_MAX of
+    shrink is split at the word boundary that best balances the two halves (one
+    word may then stand alone; a single long word keeps the shrink).
+    """
+    cfg = cfg or DYPOL_CAPTION
+    out = []
+    stack = list(reversed([c for c in chunks if c]))
+    while stack:
+        c = stack.pop()
+        plain = " ".join(str(w["word"]) for w in c)
+        fs = _chunk_font_size(plain, cfg["size"], cfg["max_width"], cfg["min_size"], cfg["outline"])
+        if len(c) < 2 or fs >= cfg["size"] - FIT_SHRINK_MAX:
+            out.append(c)
+            continue
+        lens = [len(str(w["word"])) for w in c]
+        best = min(range(1, len(c)), key=lambda k: (abs(sum(lens[:k]) - sum(lens[k:])), -k))
+        stack.append(c[best:])
+        stack.append(c[:best])
+    return out
+
+
 def generate_dypol_ass(words: list[dict], output_path: Path, video_width: int = 1080,
                        video_height: int = 1920) -> Path:
     """Word-level ASS karaoke in the DYPOL look.
@@ -384,7 +412,7 @@ Style: Dypol,{cfg['font']},{cfg['size']},{white},{lime},{stroke},{shadow},-1,0,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    chunks = dypol_caption_chunks(words)
+    chunks = fit_caption_chunks(dypol_caption_chunks(words), cfg)
     events = []
     for gi, chunk in enumerate(chunks):
         if not chunk:
