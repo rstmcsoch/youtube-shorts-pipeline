@@ -15,7 +15,7 @@ from .log import log
 from .name_gate import find_names, flagged_phrases
 from .niche import load_niche, get_script_context, get_visual_context, get_visual_prompt_suffix
 from .research import research_topic
-from .beats import normalize_beats, hook_warnings
+from .beats import enforce_sourced_numbers, hook_warnings, normalize_beats, research_figures, structure_problems
 from .style import block_kinds, hook_rules, load_style
 
 
@@ -273,11 +273,60 @@ def _beat_rules_text() -> dict:
         "shell commands start with \"$ \"; illustrative, never a real secret]}\n"
         "  * diagram: {\"title\": \"<= 3 words\", \"nodes\": [2-4 short labels in flow order]}\n"
         "  * stock_or_ai_still: {} (uses the matching b-roll prompt; only for real-world context like hardware or a place)\n"
+        "  Each beat also has \"role\": hook | how | catch | takeaway.\n"
         f"  Rules: beat 1 (the hook) is a proof block (count_up, kinetic_text, diagram or code_panel), never stock_or_ai_still. "
         f"Never put the same block kind more than {run} times in a row. Use count_up whenever a beat states a number. "
-        "Use stock_or_ai_still for at most 2 beats. All on-screen text follows the no-personal-names rule."
+        "Use stock_or_ai_still for at most 2 beats. All on-screen text follows the no-personal-names rule.\n"
+        "- STRUCTURE (in this order): hook (beat 1) -> how it works (2-3 beats) -> the catch (one beat, role \"catch\": "
+        "a real limitation, failure mode or trade-off, e.g. false positives, what it cannot do, or what it costs) -> "
+        "takeaway (the LAST beat, role \"takeaway\": a motion card, kinetic_text or diagram, never stock_or_ai_still). "
+        "The script says the catch out loud in its own sentence.\n"
+        "- ON-SCREEN NUMBER: at least one beat MUST be count_up with a figure copied exactly from the LIVE RESEARCH "
+        "(same digits; scale it with the suffix, e.g. 844.8 + \"M\" for 844.8 million) and \"source\" naming the "
+        "research line's [source: ...] tag. The narration says that number during that beat. If the research has "
+        "no reliable figure, use a diagram for that beat instead. NEVER invent or estimate a number.\n"
+        "- VARIETY: kinetic_text for at most 2 beats in total (plain text is the weakest block); prefer diagram, "
+        "code_panel and count_up for the how-it-works beats."
     )
     return {"hook": hook_text, "beats": beats_text}
+
+
+def _structure_needs(draft: dict, research: str) -> list[str]:
+    """What the raw draft is missing: a sourced count_up (when the research has figures) and a catch beat."""
+    beats, _ = normalize_beats(draft.get("beats"), n_segments=max(1, len(draft.get("broll_prompts") or []) or 8))
+    beats, _, has_number = enforce_sourced_numbers(beats, research)
+    problems = structure_problems(str(draft.get("script", "")), beats)
+    if not has_number and research_figures(research):
+        problems.append("numbers: no count_up beat whose figure appears in the research")
+    return problems
+
+
+def _enforce_structure(draft: dict, prompt: str, provider: str | None, research: str) -> dict:
+    """One corrective rewrite when the Short has no sourced on-screen number or no catch beat."""
+    script = str(draft.get("script", ""))
+    if len(script.split()) < 40:
+        return draft
+    problems = _structure_needs(draft, research)
+    if not problems:
+        return draft
+    log(f"Draft structure problems ({'; '.join(problems)}); requesting one structure rewrite.")
+    fix = (
+        prompt + "\n\nSTRUCTURE CORRECTION: your previous draft has these problems: " + "; ".join(problems) + ". "
+        "Fix them: follow hook -> how it works (2-3 beats) -> catch -> takeaway, give one beat role \"catch\" and "
+        "say the limitation in the script; add a count_up beat whose value is a figure copied exactly from the "
+        "research (with its source), and say that number in the narration. Keep the hook (with its number), the "
+        "facts and the length, and return the complete JSON object again."
+    )
+    try:
+        retry = _generate_json_response(fix, provider)
+    except Exception as exc:
+        log(f"Structure rewrite failed ({exc}); keeping the original draft.")
+        return draft
+    if (isinstance(retry, dict) and retry.get("script") and not script_length_problem(retry.get("script", ""))
+            and len(_hook_problems(retry["script"])) <= len(_hook_problems(script))
+            and len(_structure_needs(retry, research)) < len(problems)):
+        return retry
+    return draft
 
 
 def generate_draft(
@@ -447,8 +496,10 @@ Output JSON exactly:
 
         beats, beat_warnings = normalize_beats(
             draft.get("beats"), n_segments=len(intents) or 8, prompts=draft.get("broll_prompts"))
+        beats, number_warnings, _ = enforce_sourced_numbers(beats, research)
         draft["beats"] = beats
-        warnings = beat_warnings + hook_warnings(draft.get("script", ""))
+        warnings = (beat_warnings + number_warnings + hook_warnings(draft.get("script", ""))
+                    + structure_problems(draft.get("script", ""), beats))
         if warnings:
             for w in warnings:
                 log(f"Style check: {w}")
@@ -461,5 +512,6 @@ Output JSON exactly:
         return draft
 
     draft = _generate_json_response(prompt, provider)
-    draft = finalize(_enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider))
+    draft = _enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider)
+    draft = finalize(_enforce_structure(draft, prompt, provider, research))
     return _enforce_no_personal_names(draft, prompt, provider, finalize)

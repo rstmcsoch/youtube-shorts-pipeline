@@ -121,6 +121,11 @@ def text_sprite(text: str, f, fill) -> Image.Image:
     return spr
 
 
+# The slow 3% push on text blocks is decoration: it is not a "change" a viewer sees.
+# longest_static() switches it off so only real content changes count.
+_DRIFT = 1.0
+
+
 # ── kinetic_text ─────────────────────────────────────
 def frame_kinetic_text(data: dict, t: float, duration: float) -> Image.Image:
     words = data["words"][:4]
@@ -131,7 +136,7 @@ def frame_kinetic_text(data: dict, t: float, duration: float) -> Image.Image:
     block_h = line_h * len(words)
     y0 = (TOP + BOTTOM) / 2 - block_h / 2 + line_h / 2
     img = base_canvas()
-    drift = 1 + 0.035 * ease_in_out_cubic(t / max(duration, 0.1))  # slow push, never static
+    drift = 1 + 0.035 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT  # slow push
     for i, word in enumerate(words):
         start = 0.10 + i * 0.26
         p = progress(t, start, 0.38)
@@ -167,12 +172,13 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
     final_text = f"{pre}{_fmt_number(target, dec)}{suf}"
     size = fit_size([final_text], "display_bold", 260, int((RIGHT - LEFT - 10) / 1.035), 100)
     count_len = min(1.0, max(0.6, duration * 0.35))
-    p = progress(t, 0.15, count_len)
+    settled = bool(data.get("settled"))
+    p = 1.0 if settled else progress(t, 0.15, count_len)
     k = ease_out_cubic(p)
     text = f"{pre}{_fmt_number(target * k, dec)}{suf}"
-    done_flash = progress(t, 0.15 + count_len, 0.25)
+    done_flash = 1.0 if settled else progress(t, 0.15 + count_len, 0.25)
     num_color = mix(body, lime, done_flash)
-    drift = 1 + 0.03 * ease_in_out_cubic(t / max(duration, 0.1))
+    drift = 1 + 0.03 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT
     f = font("display_bold", int(size * drift))
     cy = 560
     draw_tag(img, "BY THE NUMBERS", TOP + 10, progress(t, 0.0, 0.25))
@@ -185,12 +191,17 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
         d.rounded_rectangle([LEFT, my, LEFT + max(14, full_w * k), my + 14], radius=7, fill=lime)
     label = data.get("label", "")
     if label:
-        lp = ease_out_cubic(progress(t, 0.45, 0.35))
+        lp = 1.0 if settled else ease_out_cubic(progress(t, 0.45, 0.35))
         lf = font("display_medium", fit_size([label], "display_medium", 64, RIGHT - LEFT, 36))
         d.text((LEFT + (1 - lp) * -60, my + 70), label, font=lf, fill=mix(bg, body, lp), anchor="la")
+    note = data.get("note", "")
+    if note:  # follow-up card: the narration's key words land under the settled number
+        np_ = ease_out_back(progress(t, 0.1, 0.4), 1.3)
+        nf = font("display_bold", fit_size([note], "display_bold", 84, RIGHT - LEFT, 44))
+        d.text((LEFT + (1 - np_) * 90, my + 190), note, font=nf, fill=mix(bg, color("amber"), clamp(np_)), anchor="la")
     source = data.get("source", "")
     if source:
-        sp = ease_out_cubic(progress(t, 0.8, 0.35))
+        sp = 1.0 if settled else ease_out_cubic(progress(t, 0.8, 0.35))
         sf = font("mono", fit_size([source], "mono", 30, RIGHT - LEFT, 22))
         d.text((LEFT, BOTTOM - 40), source, font=sf, fill=mix(bg, color("muted"), sp), anchor="la")
     return img
@@ -268,14 +279,17 @@ def frame_code_panel(data: dict, t: float, duration: float) -> Image.Image:
     d.text((x1 - 26, y0 + bar_h / 2), data.get("title", "terminal"), font=font("mono", 28),
            fill=mix(bg, color("muted"), enter), anchor="rm")
 
-    # typing schedule: ~32 chars/s, sped up so typing ends by 70% of the block
+    # typing schedule: paced so typing ends by ~70% of the block (6-32 chars/s)
     prompt_w = 2 if any(prompts) else 0
     total = sum(len(s) for s in shown) or 1
     t0 = 0.3
-    cps = max(32.0, total / max(0.5, duration * 0.7 - t0))
+    cps = _typing_cps(total, duration)
     typed = int(max(0.0, t - t0) * cps)
     done = typed >= total
     highlight_i = int(data.get("highlight", len(lines) - 1)) % len(lines)
+    typed_end = t0 + total / cps
+    if done and t > typed_end + 0.5 + PULSE_S:  # then the highlight walks the lines
+        highlight_i = (highlight_i + 1 + int((t - typed_end - 0.5 - PULSE_S) / PULSE_S)) % len(lines)
     if done:  # highlight bar sweeps behind the key line
         hp = ease_out_cubic(progress(t, t0 + total / cps + 0.15, 0.35))
         hy = y0 + bar_h + pad + highlight_i * line_h
@@ -312,6 +326,15 @@ def frame_code_panel(data: dict, t: float, duration: float) -> Image.Image:
 
 
 # ── diagram ──────────────────────────────────────────
+PULSE_S = 2.2  # after the last node lands, the active highlight moves every 2.2 s
+
+
+def diagram_step(n: int, duration: float) -> float:
+    """Seconds between node reveals: spread over ~80% of the block (one node every <= 2.8 s),
+    so a long diagram beat reveals progressively instead of landing in 2 s and holding."""
+    return min(2.8, max(0.4, (duration * 0.8 - 0.2) / max(1, n)))
+
+
 def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
     nodes = data["nodes"][:4]
     n = len(nodes)
@@ -327,10 +350,13 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
     bx0 = LEFT + 10
     draw_tag(img, title, TOP + 10, progress(t, 0.0, 0.25))
 
-    step = min(0.75, max(0.4, (duration * 0.75 - 0.2) / n))
+    step = diagram_step(n, duration)
     size = fit_size(nodes, "display_medium", 58, box_w - 80, 34)
     f = font("display_medium", size)
     active = min(n - 1, int(max(0.0, t - 0.15) / step))
+    revealed = 0.15 + (n - 1) * step + 0.32
+    if t > revealed + PULSE_S:  # all steps shown: the highlight walks the flow again
+        active = int((t - revealed - PULSE_S) / PULSE_S) % n  # first pulse moves from the last node to node 1
     for i, label in enumerate(nodes):
         start = 0.15 + i * step
         p = ease_out_back(progress(t, start, 0.32), 1.2)
@@ -357,6 +383,8 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
         w2, h2 = box_w * grow / 2, box_h * grow / 2
         cx, cy = bx0 + box_w / 2, y + box_h / 2
         fill = mix(bg, panel, a)
+        if i == active:
+            fill = mix(fill, edge, 0.22 * a)
         if i == active:  # soft glow around the active step
             glow = mix(bg, edge, 0.18 * a)
             d.rounded_rectangle([cx - w2 - 10, cy - h2 - 10, cx + w2 + 10, cy + h2 + 10], radius=22, fill=glow)
@@ -377,8 +405,12 @@ def code_typing_window(data: dict, duration: float) -> tuple[float, float]:
     shown = [(l[2:] if shell and l.startswith("$ ") else l) for l in lines]
     total = sum(len(s) for s in shown) or 1
     t0 = 0.3
-    cps = max(32.0, total / max(0.5, duration * 0.7 - t0))
+    cps = _typing_cps(total, duration)
     return t0, min(duration, t0 + total / cps)
+
+
+def _typing_cps(total_chars: int, duration: float) -> float:
+    return min(32.0, max(6.0, total_chars / max(0.5, duration * 0.7 - 0.3)))
 
 
 RENDERERS = {
@@ -393,9 +425,14 @@ def render_frame(kind: str, data: dict, t: float, duration: float) -> Image.Imag
     return RENDERERS[kind](data, t, duration)
 
 
-def render_block(kind: str, data: dict, out_path: Path, duration: float, fps: int = FPS) -> Path:
-    """Render one motion block to an H.264 mp4 (same settings as the other shots)."""
+def render_block(kind: str, data: dict, out_path: Path, duration: float, fps: int = FPS,
+                 t_offset: float = 0.0, total: float | None = None) -> Path:
+    """Render one motion block to an H.264 mp4 (same settings as the other shots).
+
+    `t_offset`/`total` render a window [t_offset, t_offset + duration] of a block whose
+    animation spans `total` seconds (a sub-shot of a continuous block)."""
     out_path = Path(out_path)
+    total = duration if total is None else total
     n_frames = max(1, int(round(duration * fps)))
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
            "-s", f"{W}x{H}", "-r", str(fps), "-i", "-", "-frames:v", str(n_frames), "-r", str(fps),
@@ -403,7 +440,7 @@ def render_block(kind: str, data: dict, out_path: Path, duration: float, fps: in
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         for i in range(n_frames):
-            proc.stdin.write(render_frame(kind, data, i / fps, duration).tobytes())
+            proc.stdin.write(render_frame(kind, data, t_offset + i / fps, total).tobytes())
         proc.stdin.close()
     except BrokenPipeError:
         pass
@@ -411,3 +448,123 @@ def render_block(kind: str, data: dict, out_path: Path, duration: float, fps: in
     if proc.wait() != 0:
         raise RuntimeError(f"ffmpeg failed rendering {kind}: {err[-400:]}")
     return out_path
+
+
+# ── sub-shot cards: nothing on screen holds past the 3.5 s static limit ──────
+# A long motion beat (7-9 s in a 58 s Short with 8 beats) used to be rendered once and
+# then re-cut with an alternating 0.92x pull-back, so a 2-3 word kinetic card (or a
+# finished count/diagram) sat unchanged for 8-9 s. Now every sub-shot gets new content:
+# kinetic_text follows the narration with a fresh card per sub-shot, count_up keeps the
+# number and lands the narration's key words under it, diagram and code_panel animate
+# continuously across the whole beat (progressive reveal / typing).
+STOPWORDS = set("""a an the and or but so of to in on at for with by from as into onto than then that this these
+those it its it's is are was were be been being do does did can could will would should may might must
+not no yes your you you're we our they their them he she his her i me my mine about over under more most
+less very just also only such which who whom what when where how why there here have has had if because
+while each every any some all both either neither into out up down off again once same other own too
+let's lets get gets got make makes made way ways thing things one anything something everything nothing
+look looks like really actually even still much many lot lots well back going goes into whether""".split())
+
+
+def key_words(words: list, limit: int = 3) -> list[str]:
+    """Up to `limit` on-screen words from a narration window: numbers and the longest
+    content words, kept in spoken order."""
+    toks = []
+    for w in words:
+        raw = str(w.get("word", "") if isinstance(w, dict) else w)
+        tok = raw.strip(" .,!?;:\"'()[]—–-")
+        if not tok or tok.lower() in STOPWORDS or (len(tok) < 3 and not any(c.isdigit() for c in tok)):
+            continue
+        if tok.lower() not in {t.lower() for t in toks}:
+            toks.append(tok)
+    if len(toks) <= limit:
+        return toks
+    ranked = sorted(toks, key=lambda t: (not any(c.isdigit() for c in t), -len(t)))[:limit]
+    return [t for t in toks if t in ranked]
+
+
+def _window(words: list | None, start: float, end: float) -> list:
+    out = []
+    for w in words or []:
+        try:
+            mid = (float(w["start"]) + float(w["end"])) / 2
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start <= mid < end:
+            out.append(w)
+    return out
+
+
+def motion_cards(kind: str, data: dict, cuts: list[float], shot_start: float = 0.0,
+                 words: list | None = None) -> list[dict]:
+    """One render spec per sub-shot: {kind, data, duration, t_offset, total}.
+
+    Continuous kinds (diagram, code_panel) are one block timed across the whole beat;
+    kinetic_text and count_up get a new card per sub-shot built from the narration words
+    spoken during it.
+    """
+    cuts = [float(c) for c in (cuts or [])] or [0.0]
+    total = sum(cuts)
+    if kind in ("diagram", "code_panel") or len(cuts) == 1:
+        specs, t = [], 0.0
+        for c in cuts:
+            specs.append({"kind": kind, "data": data, "duration": c, "t_offset": t, "total": total})
+            t += c
+        return specs
+    specs, t, prev = [], 0.0, None
+    for j, c in enumerate(cuts):
+        spoken = key_words(_window(words, shot_start + t, shot_start + t + c))
+        if j == 0:
+            card = dict(data)
+        elif kind == "kinetic_text":
+            words_ = spoken or [w for w in data.get("words", []) if w != (prev or {}).get("accent")] or data["words"]
+            accent = next((w for w in words_ if any(ch.isdigit() for ch in w)), max(words_, key=len))
+            card = {"words": words_[:4], "accent": accent}
+            if prev and [w.lower() for w in card["words"]] == [w.lower() for w in prev["words"]]:
+                card["words"] = list(reversed(card["words"]))
+        else:  # count_up: the number stays, the narration's key words land under it
+            note = " ".join(spoken[:3]) or " ".join(data.get("label", "").split()[:3])
+            card = {**data, "settled": True, "note": note[:28]}
+        specs.append({"kind": kind, "data": card, "duration": c, "t_offset": 0.0, "total": c})
+        prev = card
+        t += c
+    return specs
+
+
+def _thumb(img: Image.Image) -> list[int]:
+    # 40x40 px area averages: a slow 3% push-in barely moves them, new words or a new box do
+    return list(img.convert("L").resize((27, 48), Image.BOX).getdata())
+
+
+STATIC_DIFF = 0.5  # % of 27x48 cells whose grey level moved >= PIXEL_DELTA = "the screen changed"
+PIXEL_DELTA = 6
+
+
+def longest_static(specs: list[dict], sample_fps: int = 10, threshold: float = STATIC_DIFF) -> float:
+    """Longest stretch (s) in which the rendered picture stays within `threshold` of the
+    frame that opened the stretch. Slow drifts count as static; a new card or a node
+    reveal does not."""
+    global _DRIFT
+    anchor, run, best = None, 0.0, 0.0
+    step = 1.0 / sample_fps
+    _DRIFT, saved = 0.0, _DRIFT
+    try:
+        best = _longest_static(specs, sample_fps, threshold)
+    finally:
+        _DRIFT = saved
+    return best
+
+
+def _longest_static(specs: list[dict], sample_fps: int, threshold: float) -> float:
+    anchor, run, best = None, 0.0, 0.0
+    step = 1.0 / sample_fps
+    for spec in specs:
+        n = max(1, int(round(spec["duration"] * sample_fps)))
+        for i in range(n):
+            th = _thumb(render_frame(spec["kind"], spec["data"], spec["t_offset"] + i * step, spec["total"]))
+            if anchor is not None and 100.0 * sum(abs(a - b) >= PIXEL_DELTA for a, b in zip(anchor, th)) / len(th) < threshold:
+                run += step
+            else:
+                anchor, run = th, step
+            best = max(best, run)
+    return round(best, 2)

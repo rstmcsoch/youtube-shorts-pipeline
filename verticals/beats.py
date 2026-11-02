@@ -7,13 +7,44 @@ visual_intents). Shape:
      "keywords": [...], "fallback": "<another kind>", "data": {...}}
 
 normalize_beats() repairs what it can (unknown kind -> fallback, bad data ->
-fallback, stock in the hook -> kinetic_text, 3-in-a-row -> swap) and returns
-(beats, warnings). It never raises on model output.
+fallback, stock in the hook -> kinetic_text, 3-in-a-row -> swap, a still as the
+final beat -> takeaway card, plain kinetic_text over 30% of the beats -> diagram
+or the beat's own fallback, more than 2 stills -> motion) and returns
+(beats, warnings). It never raises on model output. Each beat also carries a
+"role" (hook / how / catch / takeaway) for the script structure check.
+
+enforce_sourced_numbers() keeps a count_up only when its figure appears in the
+research (and fills in the research line's source when the beat gave none);
+an unsourced figure becomes a diagram, never an invented number on screen.
 """
 
+import math
 import re
 
 from .style import block_kinds, block_limits, hook_rules, max_same_run, load_style
+
+ROLES = ("hook", "how", "catch", "takeaway")
+MOTION = ("kinetic_text", "count_up", "code_panel", "diagram")
+# a limitation / trade-off sentence for the "catch" beat
+CATCH_RE = re.compile(r"\b(the catch|catch is|but|however|limit(s|ation|ed)?|can't|cannot|fail(s|ed)?|struggle(s)?|"
+                      r"false (positive|alarm)s?|trade-?off|downside|weak(ness|nesses)?|still miss(es)?|isn't perfect|"
+                      r"not perfect|blind spot|problem is|risk)\b", re.I)
+NUM_TOKEN_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
+SOURCE_TAG_RE = re.compile(r"\[source:\s*([^\]]+)\]")
+
+
+def _variety() -> dict:
+    return dict(load_style().get("variety", {}))
+
+
+def kinetic_cap(n_beats: int) -> int:
+    """Most kinetic_text beats a Short may have (30% of 8 beats -> 2)."""
+    share = float(_variety().get("max_kinetic_share", 0.30))
+    return max(1, int(math.floor(share * n_beats + 1e-9)))
+
+
+def stock_cap() -> int:
+    return int(_variety().get("max_stock_beats", 2))
 
 STOCK = "stock_or_ai_still"
 CTA_RE = re.compile(r"\b(subscribe|follow (us|me|for more)|like and|hit the (like|bell)|smash|comment below|"
@@ -88,19 +119,69 @@ def _kinetic_from_keywords(keywords: list[str]) -> dict | None:
     return _clean_data("kinetic_text", {"words": words}, keywords) if words else None
 
 
-def _resolve(beat: dict, kinds: tuple, avoid: str | None = None, forbid_stock: bool = False):
-    """(kind, data) for a beat: its own kind, then its fallback, then kinetic_text, then stock."""
+def _diagram_from_keywords(keywords: list[str]) -> dict | None:
+    nodes = []
+    for k in keywords:
+        k = str(k).strip()
+        if k and k.lower() not in {n.lower() for n in nodes}:
+            nodes.append(k[:1].upper() + k[1:])
+    return _clean_data("diagram", {"nodes": nodes[:4]}, keywords) if len(nodes) >= 2 else None
+
+
+def _resolve(beat: dict, kinds: tuple, avoid=None, forbid_stock: bool = False):
+    """(kind, data) for a beat: its own kind, then its fallback, then kinetic_text, then a
+    keyword diagram, then stock. `avoid` is a kind or a set of kinds to skip."""
+    avoid = {avoid} if isinstance(avoid, str) else set(avoid or ())
     keywords = beat["keywords"]
-    tried = [beat.get("block"), beat.get("fallback"), "kinetic_text", STOCK]
+    raw = beat.get("raw", beat.get("data"))
+    tried = [beat.get("block"), beat.get("fallback"), "kinetic_text", "diagram", STOCK]
     for kind in tried:
-        if kind not in kinds or kind == avoid or (forbid_stock and kind == STOCK):
+        if kind not in kinds or kind in avoid or (forbid_stock and kind == STOCK):
             continue
-        data = _clean_data(kind, beat.get("data"), keywords)
+        data = _clean_data(kind, raw, keywords)
         if data is None and kind == "kinetic_text":
             data = _kinetic_from_keywords(keywords)
+        if data is None and kind == "diagram":
+            data = _diagram_from_keywords(keywords)
         if data is not None:
             return kind, data
+    if forbid_stock or STOCK in avoid:  # never a still where one is not allowed
+        for kind, data in (("kinetic_text", _kinetic_from_keywords(keywords or ["key", "point"])),):
+            if data is not None:
+                return kind, data
     return STOCK, {}
+
+
+def _count(beats: list[dict], kind: str, skip: int | None = None) -> int:
+    return sum(1 for j, b in enumerate(beats) if b["block"] == kind and j != skip)
+
+
+def _avoid_for(beats: list[dict], i: int, extra=()) -> set:
+    """Kinds beat i must not become: caps already reached, a still as the last beat, runs of 3."""
+    avoid = set(extra)
+    if _count(beats, "kinetic_text", skip=i) >= kinetic_cap(len(beats)):
+        avoid.add("kinetic_text")
+    if _count(beats, STOCK, skip=i) >= stock_cap() or i == len(beats) - 1:
+        avoid.add(STOCK)
+    limit = max_same_run()
+    kinds = [b["block"] for b in beats]
+    for kind in set(kinds):
+        for start in range(max(0, i - limit), i + 1):
+            window = [kind if j == i else kinds[j] for j in range(start, min(len(kinds), start + limit + 1))]
+            if len(window) == limit + 1 and len(set(window)) == 1:
+                avoid.add(kind)
+    return avoid
+
+
+def _convert(beats: list[dict], i: int, kinds: tuple, why: str, warnings: list[str], extra=()) -> bool:
+    old = beats[i]["block"]
+    kind, data = _resolve(beats[i], kinds, avoid=_avoid_for(beats, i, extra) | {old},
+                          forbid_stock=(i == 0 or i == len(beats) - 1))
+    if kind == old:
+        return False
+    warnings.append(f"beat {i}: {why}, {old} -> {kind}")
+    beats[i]["block"], beats[i]["data"] = kind, data
+    return True
 
 
 def normalize_beats(raw, n_segments: int = 8, prompts: list | None = None) -> tuple[list[dict], list[str]]:
@@ -125,20 +206,145 @@ def normalize_beats(raw, n_segments: int = 8, prompts: list | None = None) -> tu
         if fallback not in kinds or fallback == block:
             fallback = default_fb if block != default_fb else "kinetic_text"
         beat = {"block": block, "keywords": keywords, "fallback": fallback, "data": item.get("data")}
-        kind, data = _resolve(beat, kinds, forbid_stock=(i == 0 and not hook_rules().get("stock_allowed_in_hook", False)))
+        last = i == n_segments - 1 and n_segments > 1
+        kind, data = _resolve(beat, kinds, forbid_stock=(i == 0 and not hook_rules().get("stock_allowed_in_hook", False))
+                              or last)
         if block and kind != block:
             warnings.append(f"beat {i}: {block} data unusable or not allowed, rendered as {kind}")
-        beats.append({"block": kind, "keywords": keywords, "fallback": fallback, "data": data})
+        role = str(item.get("role") or "").strip().lower()
+        if role not in ROLES:
+            role = "hook" if i == 0 else "takeaway" if last else "how"
+        beats.append({"block": kind, "keywords": keywords, "fallback": fallback, "data": data, "role": role,
+                      "raw": item.get("data")})
 
     # Variety governor: never more than max_same_run of one kind in a row.
     limit = max_same_run()
     for i in range(limit, len(beats)):
         window = [b["block"] for b in beats[i - limit:i + 1]]
         if len(set(window)) == 1:
-            kind, data = _resolve(beats[i], kinds, avoid=window[0])
+            kind, data = _resolve(beats[i], kinds, avoid=_avoid_for(beats, i, {window[0]}),
+                                  forbid_stock=(i == len(beats) - 1))
             warnings.append(f"beat {i}: {limit + 1} '{window[0]}' in a row, switched to {kind}")
             beats[i]["block"], beats[i]["data"] = kind, data
+
+    # Plain kinetic_text at most ~30% of the beats (shots are near-equal, so ~30% of the
+    # runtime): convert the middle ones first, the takeaway and the hook last.
+    order = [j for j in range(1, len(beats) - 1)] + ([len(beats) - 1] if len(beats) > 1 else []) + [0]
+    for j in order:
+        if _count(beats, "kinetic_text") <= kinetic_cap(len(beats)):
+            break
+        if beats[j]["block"] == "kinetic_text":
+            _convert(beats, j, kinds, "kinetic_text over 30%", warnings, {"kinetic_text"})
+
+    # At most stock_cap stills; extra ones (from the end) become motion blocks.
+    for j in reversed(range(len(beats))):
+        if _count(beats, STOCK) <= stock_cap():
+            break
+        if beats[j]["block"] == STOCK:
+            _convert(beats, j, kinds, "too many stills", warnings, {STOCK})
+
+    # Last resort for degenerate input (one-word keywords, no data): variety beats the caps.
+    for i in range(limit, len(beats)):
+        window = [b["block"] for b in beats[i - limit:i + 1]]
+        if len(set(window)) == 1:
+            kind, data = _resolve(beats[i], kinds, avoid={window[0]}, forbid_stock=(i == len(beats) - 1))
+            if kind == window[0]:
+                if i == len(beats) - 1:  # the takeaway stays a motion card: break the run one beat earlier
+                    i -= 1
+                    kind, data = _resolve(beats[i], kinds, avoid={window[0]})
+                if kind == window[0]:
+                    kind, data = STOCK, {}
+            warnings.append(f"beat {i}: {limit + 1} '{window[0]}' in a row, switched to {kind}")
+            beats[i]["block"], beats[i]["data"] = kind, data
+
+    for b in beats:
+        b.pop("raw", None)
     return beats, warnings
+
+
+def has_role(beats: list[dict], role: str) -> bool:
+    return any(isinstance(b, dict) and b.get("role") == role for b in beats or [])
+
+
+def kinetic_share(beats: list[dict]) -> float:
+    return _count(beats, "kinetic_text") / max(1, len(beats))
+
+
+def _num(text: str) -> float | None:
+    try:
+        return float(str(text).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def research_figures(research: str) -> list[tuple[float, str]]:
+    """(number, source) for every figure in the research; source = the line's [source: ...] tag."""
+    text = str(research or "")
+    if "No live research available" in text:
+        return []
+    out = []
+    for line in text.splitlines():
+        tag = SOURCE_TAG_RE.search(line)
+        src = tag.group(1).strip() if tag else ""
+        body = SOURCE_TAG_RE.sub("", line)
+        for m in NUM_TOKEN_RE.findall(body):
+            v = _num(m)
+            if v is not None:
+                out.append((v, src))
+    return out
+
+
+def _sourced(value: float, figures: list[tuple[float, str]]) -> tuple[bool, str]:
+    for v, src in figures:
+        if abs(v - value) <= max(1e-9, abs(v) * 1e-6):
+            return True, src
+    return False, ""
+
+
+def enforce_sourced_numbers(beats: list[dict], research: str) -> tuple[list[dict], list[str], bool]:
+    """Keep only count_up beats whose figure is in the research. Returns (beats, warnings, has_number).
+
+    An unsourced count_up becomes its fallback / a diagram (never an invented figure).
+    With no sourced number at all, the Short must at least carry one diagram.
+    """
+    kinds = block_kinds()
+    figures = research_figures(research)
+    warnings: list[str] = []
+    has_number = False
+    for i, b in enumerate(beats):
+        if b.get("block") != "count_up":
+            continue
+        ok, src = _sourced(float(b["data"].get("value", 0)), figures)
+        if ok:
+            has_number = True
+            if not b["data"].get("source"):
+                b["data"]["source"] = ("Source: " + src)[:60] if src else ""
+            continue
+        b.setdefault("raw", {})
+        _convert(beats, i, kinds, f"count_up figure {b['data'].get('value')} not found in research",
+                 warnings, {"count_up"})
+        b.pop("raw", None)
+    if not has_number and not any(b.get("block") == "diagram" for b in beats) and len(beats) > 2:
+        for i in list(range(1, len(beats) - 1)):
+            if beats[i]["block"] in ("kinetic_text", STOCK):
+                kind, data = "diagram", _diagram_from_keywords(beats[i]["keywords"])
+                if data:
+                    warnings.append(f"beat {i}: no sourced number, {beats[i]['block']} -> diagram")
+                    beats[i]["block"], beats[i]["data"] = kind, data
+                    break
+    if not has_number:
+        warnings.append("numbers: no count_up with a figure from the research")
+    return beats, warnings, has_number
+
+
+def structure_problems(script: str, beats: list[dict]) -> list[str]:
+    """hook -> how (2-3) -> catch -> takeaway: what is missing."""
+    out = []
+    if not has_role(beats, "catch") or not CATCH_RE.search(str(script or "")):
+        out.append("structure: no catch/limit beat (what the technology gets wrong or cannot do)")
+    if beats and beats[-1].get("block") not in MOTION:
+        out.append("structure: the final beat is not a motion takeaway card")
+    return out
 
 
 def variety_ok(beats: list[dict]) -> bool:

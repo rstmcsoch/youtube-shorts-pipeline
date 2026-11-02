@@ -10,7 +10,7 @@ from pathlib import Path
 from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PROVIDERS
 from .config import MEDIA_DIR, run_cmd
 from .log import log
-from .motion import MOTION_KINDS, code_typing_window, render_block
+from .motion import MOTION_KINDS, code_typing_window, motion_cards, render_block
 from .style import STYLE_DIR
 
 EFFECTS = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
@@ -169,6 +169,35 @@ def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET
 
 
 MAX_SHOT_SECONDS = 8.0
+
+
+def final_motion_shot(plan: list[dict], sources: list[dict]) -> list[dict]:
+    """The Short never ends on a still: if the planner put a still or gradient last, swap in
+    the last segment's motion block (the takeaway card) when it is free, else the latest
+    motion source not already shown right before it."""
+    if not plan:
+        return plan
+    last = plan[-1]
+    src = sources[last["source"]] if last["source"] is not None else {}
+    if src.get("kind") == "motion":
+        return plan
+    used = {s["source"] for s in plan[:-1]}
+    prev = plan[-2]["source"] if len(plan) > 1 else None
+    motion = [i for i, s in enumerate(sources) if s.get("kind") == "motion" and i != prev]
+    pick = next((i for i in sorted(motion, key=lambda i: -sources[i].get("segment", 0)) if i not in used), None)
+    if pick is None and motion:
+        pick = max(motion, key=lambda i: sources[i].get("segment", 0))
+    if pick is not None:
+        last.update(source=pick, effect=EFFECTS[0], variant=0)
+        log(f"Final shot was a {src.get('kind', 'gradient')}; using motion block {sources[pick]['block']} instead")
+    return plan
+
+
+def kinetic_runtime_share(plan: list[dict], sources: list[dict]) -> float:
+    total = sum(s["duration"] for s in plan) or 1.0
+    kin = sum(s["duration"] for s in plan if s["source"] is not None
+              and sources[s["source"]].get("block") == "kinetic_text")
+    return round(kin / total, 3)
 
 
 def shot_count(sources: list[dict], duration: float, target: float = SHOT_TARGET_SECONDS,
@@ -380,6 +409,9 @@ def assemble_video(
     plan = plan_shots(sources, duration, durations=[sum(g) for g in groups])
     for shot, cuts in zip(plan, groups):
         shot["cuts"] = cuts
+    plan = final_motion_shot(plan, sources)
+    starts = shot_timeline(plan)
+    log(f"Kinetic-text share of runtime: {kinetic_runtime_share(plan, sources):.0%}")
     (out_dir / "shot_plan.json").write_text(json.dumps([
         {**shot, "file": str(sources[shot["source"]]["path"].name) if shot["source"] is not None else "gradient",
          "kind": sources[shot["source"]]["kind"] if shot["source"] is not None else "gradient"}
@@ -410,6 +442,15 @@ def assemble_video(
         whole = out_dir / f"anim_{i}_whole.mp4" if len(cuts) > 1 else anim
         if src["kind"] == "motion":
             try:
+                if len(cuts) > 1 and src["block"] in ("kinetic_text", "count_up"):
+                    # a new card per sub-shot, following the narration (never one card for 8 s)
+                    parts = []
+                    for j, spec in enumerate(motion_cards(src["block"], src["data"], cuts, starts[i], words)):
+                        part = out_dir / f"anim_{i}_{j}.mp4"
+                        render_block(spec["kind"], spec["data"], part, spec["duration"])
+                        parts.append(part)
+                    _concat_copy(parts, anim)
+                    return anim
                 render_block(src["block"], src["data"], whole, shot["duration"])
                 if len(cuts) > 1:
                     _recut(whole, anim, cuts, PULL_BACK)

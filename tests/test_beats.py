@@ -31,7 +31,8 @@ def test_bad_data_falls_back_and_hook_never_stock():
     beats, _ = normalize_beats([
         {"block": "count_up", "keywords": ["fast", "model"], "fallback": "stock_or_ai_still", "data": {"value": "lots"}},
         {"block": "stock_or_ai_still", "keywords": ["datacenter"]},
-    ], n_segments=2)
+        {"block": "diagram", "keywords": ["a"], "data": {"nodes": ["A", "B"]}},
+    ], n_segments=3)
     assert beats[0]["block"] == "kinetic_text"  # stock is not allowed in the hook
     assert beats[0]["data"]["words"] == ["fast", "model"]
     assert beats[1]["block"] == "stock_or_ai_still"

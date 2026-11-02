@@ -18,6 +18,13 @@ screen:
 
 variety:
   max_same_kind_in_a_row: 2    # never 3 blocks of the same kind in a row
+  max_kinetic_share: 0.30      # plain kinetic_text is at most 30% of the runtime
+  max_stock_beats: 2           # stock_or_ai_still for at most 2 beats
+  min_count_up: 1              # every Short shows at least one sourced on-screen number
+
+structure:                     # hook -> how it works (2-3 beats) -> the catch -> takeaway
+  roles: [hook, how, catch, takeaway]
+  final_block_motion: true     # the last beat is a motion takeaway card, never a still
 
 hook:
   first_word_by_s: 0.5         # no intro, no silence before the first word
