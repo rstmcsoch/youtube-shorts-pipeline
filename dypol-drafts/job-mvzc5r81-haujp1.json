@@ -1,0 +1,16 @@
+{
+  "job_id": "job-mvzc5r81-haujp1",
+  "producing_run_id": "41459351729",
+  "artifact_name": "draft-job-mvzc5r81-haujp1",
+  "draft_file": "1793628667.json",
+  "language": "en",
+  "title": "How AI Actually Reads Medical X-Rays",
+  "topic": "How AI reads medical X-rays",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793628667_en/broll_manifest.json",
+  "contains_synthetic_media": false,
+  "image_providers": [
+    "gradient",
+    "pixabay"
+  ]
+}
