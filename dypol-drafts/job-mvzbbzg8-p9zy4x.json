@@ -1,0 +1,16 @@
+{
+  "job_id": "job-mvzbbzg8-p9zy4x",
+  "producing_run_id": "41455939836",
+  "artifact_name": "draft-job-mvzbbzg8-p9zy4x",
+  "draft_file": "1793627260.json",
+  "language": "en",
+  "title": "How Apple Face ID Actually Works",
+  "topic": "How AI unlocks your phone with your face",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793627260_en/broll_manifest.json",
+  "contains_synthetic_media": false,
+  "image_providers": [
+    "gradient",
+    "pixabay"
+  ]
+}
