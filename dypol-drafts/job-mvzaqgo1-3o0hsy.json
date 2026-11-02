@@ -1,0 +1,16 @@
+{
+  "job_id": "job-mvzaqgo1-3o0hsy",
+  "producing_run_id": "41453516667",
+  "artifact_name": "draft-job-mvzaqgo1-3o0hsy",
+  "draft_file": "1793626257.json",
+  "language": "en",
+  "title": "How AI Stops Credit Card Fraud",
+  "topic": "How AI detects credit card fraud",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793626257_en/broll_manifest.json",
+  "contains_synthetic_media": true,
+  "image_providers": [
+    "cloudflare_workers_ai",
+    "pixabay"
+  ]
+}
