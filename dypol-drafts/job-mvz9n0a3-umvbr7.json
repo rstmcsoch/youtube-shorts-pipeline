@@ -1,0 +1,16 @@
+{
+  "job_id": "job-mvz9n0a3-umvbr7",
+  "producing_run_id": "41449151981",
+  "artifact_name": "draft-job-mvz9n0a3-umvbr7",
+  "draft_file": "1793624428.json",
+  "language": "en",
+  "title": "How AI Turns Speech Into Text",
+  "topic": "How AI turns speech into text",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793624428_en/broll_manifest.json",
+  "contains_synthetic_media": true,
+  "image_providers": [
+    "cloudflare_workers_ai",
+    "pixabay"
+  ]
+}
