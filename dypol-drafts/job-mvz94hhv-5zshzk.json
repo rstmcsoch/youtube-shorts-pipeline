@@ -1,0 +1,16 @@
+{
+  "job_id": "job-mvz94hhv-5zshzk",
+  "producing_run_id": "41447231535",
+  "artifact_name": "draft-job-mvz94hhv-5zshzk",
+  "draft_file": "1793623609.json",
+  "language": "en",
+  "title": "How AI Reads Your Handwriting",
+  "topic": "How AI reads your handwriting",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793623609_en/broll_manifest.json",
+  "contains_synthetic_media": true,
+  "image_providers": [
+    "cloudflare_workers_ai",
+    "pixabay"
+  ]
+}
