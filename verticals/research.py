@@ -95,13 +95,23 @@ def _wiki_query(news: str) -> str:
     return " ".join(q.split()) or str(news or "")
 
 
-def wikipedia_research(news: str, pages: int = 2, chars: int = 900) -> str:
-    """Lead-section extracts of the top Wikipedia hits, each line tagged with its article."""
+def _wiki_search(query: str, limit: int) -> list[str]:
+    r = requests.get(WIKI_API, params={"action": "query", "list": "search", "srsearch": query,
+                                       "srlimit": limit, "format": "json"}, headers=WIKI_HEADERS, timeout=10)
+    r.raise_for_status()
+    return [h["title"] for h in r.json().get("query", {}).get("search", [])][:limit]
+
+
+def wikipedia_research(news: str, pages: int = 3, chars: int = 800) -> str:
+    """Lead-section extracts of the top Wikipedia hits for the topic plus its machine-learning
+    angle ("how AI ..." topics need the mechanism, not only background), each line tagged."""
     try:
-        r = requests.get(WIKI_API, params={"action": "query", "list": "search", "srsearch": _wiki_query(news),
-                                           "srlimit": pages, "format": "json"}, headers=WIKI_HEADERS, timeout=10)
-        r.raise_for_status()
-        titles = [h["title"] for h in r.json().get("query", {}).get("search", [])][:pages]
+        core = _wiki_query(news)
+        titles = []
+        for query, limit in ((core, 2), (core + " machine learning", 2)):
+            for t in _wiki_search(query, limit):
+                if t not in titles and len(titles) < pages:
+                    titles.append(t)
         if not titles:
             return ""
         r = requests.get(WIKI_API, params={"action": "query", "prop": "extracts", "exintro": 1, "explaintext": 1,

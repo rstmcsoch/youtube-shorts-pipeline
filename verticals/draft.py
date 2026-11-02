@@ -15,7 +15,8 @@ from .log import log
 from .name_gate import find_names, flagged_phrases
 from .niche import load_niche, get_script_context, get_visual_context, get_visual_prompt_suffix
 from .research import research_topic
-from .beats import enforce_sourced_numbers, hook_warnings, normalize_beats, research_figures, structure_problems
+from .beats import (enforce_sourced_numbers, hook_warnings, normalize_beats, research_figures, structure_problems,
+                    unsourced_spoken_numbers)
 from .style import block_kinds, hook_rules, load_style
 
 
@@ -95,8 +96,8 @@ def _generate_json_response(prompt: str, provider: str | None) -> dict:
             ) from second_error
 
 
-SCRIPT_MIN_WORDS = 135  # ≈50 s at the measured ~158 WPM (style guide: 50-65 s Shorts)
-SCRIPT_MAX_WORDS = 170  # ≈72 s
+SCRIPT_MIN_WORDS = 120  # ≈50 s at the measured 133-158 WPM (style guide: 50-65 s Shorts)
+SCRIPT_MAX_WORDS = 150  # ≈65 s at 140 WPM (a 155-word draft ran 70 s)
 
 
 def script_length_problem(script: str) -> str:
@@ -141,7 +142,7 @@ def _hook_problems(script: str) -> list[str]:
     return [w for w in hook_warnings(script) if w.startswith("hook:")]
 
 
-def _enforce_hook(draft: dict, prompt: str, provider: str | None) -> dict:
+def _enforce_hook(draft: dict, prompt: str, provider: str | None, research: str = "") -> dict:
     """One corrective rewrite when the hook has no number by ~8 s or opens with setup.
 
     The prompt already asks for both, but the first real draft still opened with
@@ -157,7 +158,8 @@ def _enforce_hook(draft: dict, prompt: str, provider: str | None) -> dict:
         prompt + "\n\nHOOK CORRECTION: your previous script started: \"" + " ".join(script.split()[:30]) + "...\". "
         "Problems: " + "; ".join(problems) + ". Rewrite ONLY the opening so sentence 1 (at most 12 words) is the "
         "most surprising concrete fact, and a real, checkable number (a figure, percentage, year or count from the "
-        "research) is spoken within the first 20 words. No setup such as 'let me explain', 'in sixty seconds', "
+        "research, copied exactly; never a number that is not in the research) is spoken within the first 20 words. "
+        "No setup such as 'let me explain', 'in sixty seconds', "
         "'most people get this wrong'. Keep the rest of the script, the beats and the length, and return the "
         "complete JSON object again."
     )
@@ -167,7 +169,9 @@ def _enforce_hook(draft: dict, prompt: str, provider: str | None) -> dict:
         log(f"Hook rewrite failed ({exc}); keeping the original draft.")
         return draft
     if (isinstance(retry, dict) and retry.get("script") and not script_length_problem(retry.get("script", ""))
-            and len(_hook_problems(retry["script"])) < len(problems)):
+            and len(_hook_problems(retry["script"])) < len(problems)
+            and len(unsourced_spoken_numbers(retry["script"], research))
+            <= len(unsourced_spoken_numbers(script, research))):
         return retry
     return draft
 
@@ -285,6 +289,11 @@ def _beat_rules_text() -> dict:
         "(same digits; scale it with the suffix, e.g. 844.8 + \"M\" for 844.8 million) and \"source\" naming the "
         "research line's [source: ...] tag. The narration says that number during that beat. If the research has "
         "no reliable figure, use a diagram for that beat instead. NEVER invent or estimate a number.\n"
+        "- TOPIC FOCUS: the how-it-works beats explain the mechanism the topic asks about, step by step (what data "
+        "goes in, what the model does with it, what comes out). Background and statistics support that; they never "
+        "replace it.\n"
+        "- FIGURES: every number spoken or shown is copied from the LIVE RESEARCH. Do not round, convert or "
+        "re-express a figure as a percentage it is not.\n"
         "- VARIETY: kinetic_text for at most 2 beats in total (plain text is the weakest block); prefer diagram, "
         "code_panel and count_up for the how-it-works beats."
     )
@@ -298,6 +307,10 @@ def _structure_needs(draft: dict, research: str) -> list[str]:
     problems = structure_problems(str(draft.get("script", "")), beats)
     if not has_number and research_figures(research):
         problems.append("numbers: no count_up beat whose figure appears in the research")
+    bad = unsourced_spoken_numbers(str(draft.get("script", "")), research)
+    if bad:
+        problems.append("numbers: the script says " + ", ".join(f'"{b}"' for b in bad[:4])
+                        + ", which is not in the research (remove it or use a figure the research states)")
     return problems
 
 
@@ -314,8 +327,9 @@ def _enforce_structure(draft: dict, prompt: str, provider: str | None, research:
         prompt + "\n\nSTRUCTURE CORRECTION: your previous draft has these problems: " + "; ".join(problems) + ". "
         "Fix them: follow hook -> how it works (2-3 beats) -> catch -> takeaway, give one beat role \"catch\" and "
         "say the limitation in the script; add a count_up beat whose value is a figure copied exactly from the "
-        "research (with its source), and say that number in the narration. Keep the hook (with its number), the "
-        "facts and the length, and return the complete JSON object again."
+        "research (with its source), and say that number in the narration. Every figure spoken must be copied from "
+        "the research. Keep the hook (with a sourced number), the facts and the length, and return the complete "
+        "JSON object again."
     )
     try:
         retry = _generate_json_response(fix, provider)
@@ -397,7 +411,7 @@ def generate_draft(
     beat_rules = _beat_rules_text()
     feedback_note = reviewer_feedback_block(reviewer_feedback_text(reviewer_feedback))
 
-    prompt = f"""You are writing a {platform_label} script of {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words (45-75 seconds spoken; aim for about 145 words).{channel_note}
+    prompt = f"""You are writing a {platform_label} script of {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words (45-75 seconds spoken; aim for about 135 words).{channel_note}
 
 {script_context}
 
@@ -512,6 +526,6 @@ Output JSON exactly:
         return draft
 
     draft = _generate_json_response(prompt, provider)
-    draft = _enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider)
+    draft = _enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider, research)
     draft = finalize(_enforce_structure(draft, prompt, provider, research))
     return _enforce_no_personal_names(draft, prompt, provider, finalize)

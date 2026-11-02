@@ -72,10 +72,13 @@ def _clean_data(kind: str, data, keywords: list[str]) -> dict | None:
         return {}
     if kind == "kinetic_text":
         words = _words(data.get("words")) or _words(data.get("text"))
+        words = [w for item in words for w in str(item).split()]  # ["Financial fraud losses"] -> 3 lines
         if not words:
             return None
         words = words[: int(lim.get("max_words", 4))]
         accent = str(data.get("accent") or "").strip()
+        if accent not in words and accent.split() and accent.split()[-1] in words:
+            accent = accent.split()[-1]
         if accent not in words:
             accent = max(words, key=len)
         return {"words": words, "accent": accent}
@@ -335,6 +338,74 @@ def enforce_sourced_numbers(beats: list[dict], research: str) -> tuple[list[dict
     if not has_number:
         warnings.append("numbers: no count_up with a figure from the research")
     return beats, warnings, has_number
+
+
+_UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                       "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 10 * (i + 2) for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split())}
+_SCALES = {"hundred": 100, "thousand": 1e3, "million": 1e6, "billion": 1e9, "trillion": 1e12}
+_SMALL_OK = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100}  # "one model", "two steps", "a hundred" are not figures
+
+
+def spoken_numbers(script: str) -> list[tuple[float, str]]:
+    """(value, text) for every figure in the narration, digits or words ("eighty-four percent")."""
+    out = []
+    toks = re.findall(r"[A-Za-z]+|\d[\d,]*(?:\.\d+)?", str(script or "").replace("-", " "))
+    i = 0
+    while i < len(toks):
+        t = toks[i].lower()
+        if t[0].isdigit():
+            v = _num(t)
+            if v is not None:
+                out.append((v, toks[i]))
+            i += 1
+            continue
+        if t in _UNITS or t in _TENS:
+            total, cur, j = 0.0, 0.0, i
+            while j < len(toks) and toks[j].lower() in {**_UNITS, **_TENS, **_SCALES, "and": 0, "point": 0}:
+                w = toks[j].lower()
+                if w == "point":  # "one point six six billion" -> 1.66e9
+                    digits = ""
+                    while j + 1 < len(toks) and toks[j + 1].lower() in _UNITS and _UNITS[toks[j + 1].lower()] < 10:
+                        j += 1
+                        digits += str(_UNITS[toks[j].lower()])
+                    if digits:
+                        cur += float("0." + digits)
+                elif w in _UNITS:
+                    cur += _UNITS[w]
+                elif w in _TENS:
+                    cur += _TENS[w]
+                elif w == "hundred":
+                    cur = (cur or 1) * 100
+                elif w in _SCALES:
+                    total += (cur or 1) * _SCALES[w]
+                    cur = 0
+                j += 1
+            out.append((total + cur, " ".join(toks[i:j])))
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def unsourced_spoken_numbers(script: str, research: str) -> list[str]:
+    """Figures the narration says that appear nowhere in the research (in any scale).
+
+    Small counts (one..ten, a hundred) and years are left alone. Empty when the research
+    has no figures at all (nothing to check against; the prompt then forbids figures).
+    """
+    figures = research_figures(research)
+    if not figures:
+        return []
+    vals = {round(v, 6) for v, _ in figures}
+    bad = []
+    for v, text in spoken_numbers(script):
+        if v in _SMALL_OK or (1900 <= v <= 2100 and float(v).is_integer()):
+            continue
+        scaled = {round(v / k, 6) for k in (1, 1e3, 1e6, 1e9, 1e12)}
+        if not scaled & vals:
+            bad.append(text)
+    return bad
 
 
 def structure_problems(script: str, beats: list[dict]) -> list[str]:

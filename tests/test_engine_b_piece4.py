@@ -190,3 +190,30 @@ def test_prompt_states_structure_number_and_variety_rules(mock_llm, _research):
     assert "STRUCTURE (in this order)" in prompt and "the catch" in prompt
     assert "ON-SCREEN NUMBER" in prompt and "NEVER invent" in prompt
     assert "kinetic_text for at most 2 beats" in prompt
+
+
+# ── draft-3 review fixes ─────────────────────────────────────────────────────
+
+def test_spoken_figure_not_in_research_is_flagged():
+    from verticals.beats import unsourced_spoken_numbers
+    script = ("Eighty-four percent of losses slipped through. Losses totalled 844.8 million pounds, "
+              "and banks prevented one point six six billion in 2018 with two checks.")
+    assert unsourced_spoken_numbers(script, RESEARCH) == ["Eighty four"]
+    assert unsourced_spoken_numbers("Banks prevented £1.66 billion.", RESEARCH) == []
+
+
+def test_narration_cards_are_phrases_not_word_salad():
+    from verticals.motion import key_words
+    words = "Modern carding sites operate as full-service commercial entities, exploiting data".split()
+    assert key_words(words) == ["full-service", "commercial", "entities"]
+
+
+def test_multi_word_kinetic_item_is_split_into_lines():
+    beats, _ = normalize_beats([_kt(["Financial fraud losses"]), _kt(["end", "card"])], n_segments=2)
+    assert beats[0]["data"]["words"] == ["Financial", "fraud", "losses"]
+
+
+def test_all_motion_beats_get_no_extra_repeat_shot():
+    from verticals.assemble import shot_count
+    src = [{"kind": "motion", "segment": i} for i in range(8)] + [{"kind": "still", "backup": True}] * 8
+    assert shot_count(src, 70.1) == 8  # draft 3: 9 shots replayed the catch diagram after the takeaway

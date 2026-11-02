@@ -212,6 +212,10 @@ def shot_count(sources: list[dict], duration: float, target: float = SHOT_TARGET
     primaries = sum(1 for s in sources if not s.get("backup"))
     default = max(1, math.ceil(duration / target - 1e-6))
     floor = max(1, math.ceil(duration / max_len - 1e-6))
+    if primaries and all(s.get("kind") == "motion" for s in sources if not s.get("backup")):
+        # every beat is a motion block that changes card per sub-shot, so a long beat is fine;
+        # an extra shot would replay an earlier beat after the takeaway (draft 3 ended on a repeat)
+        return min(default, primaries)
     return max(floor, min(default, primaries or default))
 
 

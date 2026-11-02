@@ -467,20 +467,30 @@ look looks like really actually even still much many lot lots well back going go
 
 
 def key_words(words: list, limit: int = 3) -> list[str]:
-    """Up to `limit` on-screen words from a narration window: numbers and the longest
-    content words, kept in spoken order."""
-    toks = []
+    """An on-screen phrase from a narration window: the best run of consecutive content
+    words ("traditional security measures"), so the card reads as a phrase, not a word salad.
+    Runs with a number win, then longer runs, then longer words."""
+    runs, cur = [], []
     for w in words:
         raw = str(w.get("word", "") if isinstance(w, dict) else w)
         tok = raw.strip(" .,!?;:\"'()[]—–-")
-        if not tok or tok.lower() in STOPWORDS or (len(tok) < 3 and not any(c.isdigit() for c in tok)):
-            continue
-        if tok.lower() not in {t.lower() for t in toks}:
-            toks.append(tok)
-    if len(toks) <= limit:
-        return toks
-    ranked = sorted(toks, key=lambda t: (not any(c.isdigit() for c in t), -len(t)))[:limit]
-    return [t for t in toks if t in ranked]
+        content = tok and tok.lower() not in STOPWORDS and (len(tok) >= 3 or any(c.isdigit() for c in tok))
+        if content:
+            cur.append(tok)
+        if not content or raw.rstrip()[-1:] in ".,!?;:—–":  # a stopword or a clause end breaks the run
+            if cur:
+                runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    best, best_key = [], None
+    for run in runs:
+        for a in range(len(run)):
+            seg = run[a:a + limit]
+            key = (any(ch.isdigit() for t in seg for ch in t), len(seg), sum(len(t) for t in seg))
+            if best_key is None or key > best_key:
+                best, best_key = seg, key
+    return best
 
 
 def _window(words: list | None, start: float, end: float) -> list:
