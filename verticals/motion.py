@@ -206,8 +206,15 @@ def _sprite_cache(word: str, size: int, colour: str) -> Image.Image:
 
 
 # ── count_up ─────────────────────────────────────────
-def _fmt_number(value: float, decimals: int) -> str:
+def _fmt_number(value: float, decimals: int, year: bool = False) -> str:
+    if year:  # 1895, not 1,895
+        return f"{value:.0f}"
     return f"{value:,.{decimals}f}"
+
+
+def _is_year(data: dict) -> bool:
+    v = float(data.get("value", 0))
+    return (v.is_integer() and 1800 <= v <= 2100 and not data.get("prefix") and not data.get("suffix"))
 
 
 def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
@@ -216,13 +223,14 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
     bg, body, lime = color("background"), color("body"), color("lime")
     target, dec = float(data["value"]), int(data.get("decimals", 0))
     pre, suf = data.get("prefix", ""), data.get("suffix", "")
-    final_text = f"{pre}{_fmt_number(target, dec)}{suf}"
+    year = _is_year(data)
+    final_text = f"{pre}{_fmt_number(target, dec, year)}{suf}"
     size = fit_size([final_text], "display_bold", 260, int((RIGHT - LEFT - 10) / 1.035), 100)
     count_len = min(1.0, max(0.6, duration * 0.35))
     settled = bool(data.get("settled"))
     p = 1.0 if settled else progress(t, 0.15, count_len)
     k = ease_out_cubic(p)
-    text = f"{pre}{_fmt_number(target * k, dec)}{suf}"
+    text = f"{pre}{_fmt_number(target * k, dec, year)}{suf}"
     done_flash = 1.0 if settled else progress(t, 0.15 + count_len, 0.25)
     num_color = mix(body, lime, done_flash)
     drift = 1 + 0.03 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT

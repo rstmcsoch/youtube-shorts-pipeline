@@ -133,8 +133,8 @@ def build_sources(frames: list[Path], out_dir: Path, beats: list | None = None) 
         still = {"path": path, "kind": "still", "provider": provider, "segment": seg,
                  "max_uses": int(row.get("max_uses") or max_uses_for(provider)),
                  "max_len": 5.0 if provider in THIRD_PARTY_PROVIDERS else None}
-        if seg in motion_segments:
-            still.update(max_uses=1, backup=True)
+        if seg in motion_segments or provider == "gradient":  # a flat gradient is never a shot of its own if
+            still.update(max_uses=1, backup=True)              # anything else is left (draft 5 showed one 5.4 s)
         sources.append(still)
     return sources
 

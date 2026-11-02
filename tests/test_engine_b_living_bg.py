@@ -119,3 +119,22 @@ def test_gradient_only_stock_beat_becomes_a_motion_card(tmp_path):
     motion = [s for s in srcs if s["kind"] == "motion"]
     assert [(m["block"], m["segment"]) for m in motion] == [("diagram", 1)]
     assert all(s.get("backup") for s in srcs if s["kind"] == "still" and s["segment"] == 1)
+
+
+def test_year_count_up_has_no_thousands_comma():
+    from verticals.motion import _fmt_number, _is_year
+    assert _is_year({"value": 1895.0}) and _fmt_number(1895.0, 0, True) == "1895"
+    assert not _is_year({"value": 1895.0, "suffix": "M"})
+
+
+def test_gradient_still_is_only_a_backup(tmp_path):
+    import json
+    from verticals.assemble import build_sources, shot_count
+    (tmp_path / "broll_0.png").write_bytes(b"x")
+    (tmp_path / "clip_0.mp4").write_bytes(b"x")
+    (tmp_path / "broll_manifest.json").write_text(json.dumps({"assets": [
+        {"frame": "broll_0.png", "segment_index": 0, "provider": "gradient",
+         "clip": {"file": "clip_0.mp4", "provider": "pixabay_video", "duration_seconds": 6}}]}))
+    srcs = build_sources([tmp_path / "broll_0.png"], tmp_path, [{"block": "stock_or_ai_still", "keywords": ["x"]}])
+    assert [s["kind"] for s in srcs if not s.get("backup")] == ["clip"]
+    assert shot_count(srcs, 6.0) == 1
