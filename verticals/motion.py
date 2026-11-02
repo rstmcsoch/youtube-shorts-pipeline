@@ -369,6 +369,18 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
     return img
 
 
+def code_typing_window(data: dict, duration: float) -> tuple[float, float]:
+    """(start, end) seconds of the code panel's typing, same schedule as frame_code_panel."""
+    lines = data.get("lines") or []
+    lang = data.get("language", "bash")
+    shell = lang in {"bash", "sh", "shell", "console", "zsh"}
+    shown = [(l[2:] if shell and l.startswith("$ ") else l) for l in lines]
+    total = sum(len(s) for s in shown) or 1
+    t0 = 0.3
+    cps = max(32.0, total / max(0.5, duration * 0.7 - t0))
+    return t0, min(duration, t0 + total / cps)
+
+
 RENDERERS = {
     "kinetic_text": frame_kinetic_text,
     "count_up": frame_count_up,

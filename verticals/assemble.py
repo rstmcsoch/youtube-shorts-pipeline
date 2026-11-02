@@ -10,11 +10,24 @@ from pathlib import Path
 from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PROVIDERS
 from .config import MEDIA_DIR, run_cmd
 from .log import log
-from .motion import MOTION_KINDS, render_block
+from .motion import MOTION_KINDS, code_typing_window, render_block
+from .style import STYLE_DIR
 
 EFFECTS = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
 SHOT_TARGET_SECONDS = 4.0
 LOUDNORM = {"I": -14.0, "TP": -1.5, "LRA": 11.0}
+FPS = 30
+ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(FPS)]
+# Sub-shot moves: a punch-in on clips, a pull-back on motion blocks (keeps their text
+# inside the safe band x 72-929, y <= 1080), cut on alternate sub-shots.
+PUNCH_IN = "scale=1210:2150,crop=1080:1920"
+PULL_BACK = "scale=994:1766,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x0F141C"
+# Final grade: light contrast, soft vignette, subtle temporal grain. Applied before captions.
+GRADE_FILTER = "eq=contrast=1.06:saturation=1.05:brightness=-0.008,vignette=angle=PI/5,noise=alls=4:allf=t"
+
+
+def _flag(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def assemble_workers() -> int:
@@ -102,16 +115,22 @@ def build_sources(frames: list[Path], out_dir: Path, beats: list | None = None) 
     return sources
 
 
-def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET_SECONDS) -> list[dict]:
+def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET_SECONDS,
+               durations: list[float] | None = None) -> list[dict]:
     """Assign ~target-second shots to sources in narration order.
 
     Rules: clips and third-party stills appear once; AI/original stills at most
     twice, and a repeat gets a different camera move + crop variant; never the
     same source twice in a row; gradients only when nothing else is left.
+    `durations` (from pacing.shot_groups) sets each shot's length; otherwise shots
+    are equal and ~target seconds.
     Returns dicts {source (index or None), duration, effect, variant}.
     """
-    n_shots = max(1, math.ceil(duration / target - 1e-6))
-    shot_len = duration / n_shots
+    if durations:
+        n_shots = len(durations)
+    else:
+        n_shots = max(1, math.ceil(duration / target - 1e-6))
+    lengths = list(durations) if durations else [duration / n_shots] * n_shots
     uses = [0] * len(sources)
     first_effect = {}
     n_seg = max([s.get("segment", 0) for s in sources] + [0]) + 1
@@ -129,7 +148,7 @@ def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET
             if best_key is None or key < best_key:
                 best, best_key = idx, key
         if best is None:
-            shots.append({"source": None, "duration": shot_len, "effect": EFFECTS[k % 4], "variant": 0})
+            shots.append({"source": None, "duration": lengths[k], "effect": EFFECTS[k % 4], "variant": 0})
             prev = None
             continue
         src = sources[best]
@@ -142,7 +161,7 @@ def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET
             variant = uses[best]
         uses[best] += 1
         prev = best
-        shots.append({"source": best, "duration": shot_len, "effect": effect, "variant": variant})
+        shots.append({"source": best, "duration": lengths[k], "effect": effect, "variant": variant})
     return shots
 
 
@@ -154,8 +173,14 @@ def shot_capacity(sources: list[dict]) -> int:
 # Audio: optional music bed (sidechain ducked) + loudnorm -14 LUFS
 # ─────────────────────────────────────────────────────
 
-def music_filter_graph(duration: float, music_gain_db: float = -22.0) -> str:
-    """Voice [1:a] + music [2:a]; music is ducked under the voice with sidechaincompress."""
+def music_filter_graph(duration: float, music_gain_db: float = -22.0, sfx: bool = False) -> str:
+    """Voice [1:a] + music [2:a] (+ SFX bed [3:a]); music is ducked under the voice with sidechaincompress.
+
+    The SFX bed is already set ~12 dB under the voice peak (verticals/sfx.py) and is
+    mixed beside the ducked music, so effects never pump the music.
+    """
+    if sfx:
+        return (music_filter_graph(duration, music_gain_db).replace("[voice][ducked]amix=inputs=2", "[voice][ducked][3:a]amix=inputs=3"))
     return (
         f"[2:a]atrim=0:{duration:.3f},asetpts=N/SR/TB,volume={music_gain_db}dB,"
         f"afade=t=in:d=1.5,afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5[bed];"
@@ -190,13 +215,22 @@ def _parse_loudnorm_json(stderr: str) -> dict | None:
 
 
 def prepare_audio(voiceover: Path, out_dir: Path, duration: float,
-                  music_path: str | None = None, music_gain_db: float = -22.0) -> Path:
-    """Mix (voice + optional ducked music) and normalize to -14 LUFS, two-pass."""
+                  music_path: str | None = None, music_gain_db: float = -22.0,
+                  sfx_path: str | None = None) -> Path:
+    """Mix (voice + optional ducked music + optional SFX bed) and normalize to -14 LUFS, two-pass."""
     out_dir = Path(out_dir)
     mix = out_dir / "audio_mix.wav"
+    has_sfx = bool(sfx_path) and Path(sfx_path).exists()
     if music_path and Path(music_path).exists():
-        run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-i", str(voiceover),
-                 "-stream_loop", "-1", "-i", str(music_path), "-filter_complex", music_filter_graph(duration, music_gain_db),
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-i", str(voiceover),
+               "-stream_loop", "-1", "-i", str(music_path)]
+        if has_sfx:
+            cmd += ["-i", str(sfx_path)]
+        run_cmd(cmd + ["-filter_complex", music_filter_graph(duration, music_gain_db, sfx=has_sfx),
+                       "-map", "[mix]", "-t", f"{duration:.3f}", "-ar", "48000", "-ac", "2", str(mix)])
+    elif has_sfx:
+        run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(voiceover), "-i", str(sfx_path), "-filter_complex",
+                 "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]",
                  "-map", "[mix]", "-t", f"{duration:.3f}", "-ar", "48000", "-ac", "2", str(mix)])
     else:
         run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(voiceover), "-t", f"{duration:.3f}",
@@ -218,6 +252,79 @@ def prepare_audio(voiceover: Path, out_dir: Path, duration: float,
 # Assembly
 # ─────────────────────────────────────────────────────
 
+def _concat_copy(parts: list[Path], out: Path) -> None:
+    lst = Path(str(out) + ".txt")
+    lst.write_text("\n".join("file '" + str(p).replace("'", "'\\''") + "'" for p in parts))
+    run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
+
+
+def recut_filter(cuts: list[float], move: str, fps: int = FPS) -> tuple[str, int]:
+    """filter_complex that cuts one rendered shot into sub-shots; odd sub-shots get `move`."""
+    n = len(cuts)
+    bounds, acc = [0], 0.0
+    for c in cuts:
+        acc += c
+        bounds.append(int(round(acc * fps)))
+    graph = f"[0:v]split={n}" + "".join(f"[s{k}]" for k in range(n)) + ";"
+    for k in range(n):
+        xf = f",{move}" if k % 2 == 1 else ""
+        graph += f"[s{k}]trim=start_frame={bounds[k]}:end_frame={bounds[k + 1]},setpts=PTS-STARTPTS{xf},setsar=1[p{k}];"
+    graph += "".join(f"[p{k}]" for k in range(n)) + f"concat=n={n}:v=1:a=0,format=yuv420p[v]"
+    return graph, bounds[-1]
+
+
+def _recut(whole: Path, out: Path, cuts: list[float], move: str) -> None:
+    graph, frames = recut_filter(cuts, move)
+    run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(whole), "-filter_complex", graph, "-map", "[v]",
+             "-frames:v", str(frames), *ENCODE, str(out)])
+
+
+def shot_timeline(plan: list[dict]) -> list[float]:
+    """Start time of every shot."""
+    starts, t = [], 0.0
+    for shot in plan:
+        starts.append(round(t, 4))
+        t += shot["duration"]
+    return starts
+
+
+def sfx_inputs(plan: list[dict], sources: list[dict], words: list | None) -> dict:
+    """Timeline facts the SFX planner needs: beat changes, sub-cuts, hook, typing, riser."""
+    starts = shot_timeline(plan)
+    beat_changes = starts[1:]
+    sub_cuts, typing, riser_at = [], [], None
+    for k, shot in enumerate(plan):
+        acc = starts[k]
+        for c in (shot.get("cuts") or [shot["duration"]])[:-1]:
+            acc += c
+            sub_cuts.append(round(acc, 4))
+        src = sources[shot["source"]] if shot["source"] is not None else {}
+        if src.get("kind") == "motion" and src.get("block") == "code_panel":
+            t0, t1 = code_typing_window(src.get("data") or {}, shot["duration"])
+            typing.append((starts[k] + t0, starts[k] + t1))
+        if riser_at is None and k > 0 and src.get("kind") == "motion" and src.get("block") == "count_up":
+            riser_at = starts[k]
+    hook_t = 0.0
+    if words:
+        try:
+            hook_t = max(0.0, min(0.5, float(words[0]["start"])))
+        except (KeyError, TypeError, ValueError, IndexError):
+            hook_t = 0.0
+    return {"beat_changes": beat_changes, "sub_cuts": sub_cuts, "hook_t": hook_t, "typing": typing,
+            "riser_at": riser_at}
+
+
+def qc_paths(job_id: str, lang: str) -> tuple[Path, Path]:
+    """qc.json + contact sheet, beside the video in MEDIA_DIR (uploaded with the draft artifact)."""
+    return (MEDIA_DIR / f"verticals_{job_id}_{lang}_qc.json", MEDIA_DIR / f"verticals_{job_id}_{lang}_contact.png")
+
+
+def _ass_filter(ass_path: str) -> str:
+    def esc(p):
+        return str(p).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    return f"ass={esc(ass_path)}:fontsdir={esc(STYLE_DIR / 'fonts')}"
+
+
 def assemble_video(
     frames: list[Path],
     voiceover: Path,
@@ -229,8 +336,16 @@ def assemble_video(
     duck_filter: str | None = None,  # legacy; music is now ducked with sidechaincompress
     music_gain_db: float = -22.0,
     beats: list | None = None,
+    words: list | None = None,
 ) -> Path:
-    """Assemble final video from shots, voiceover, captions, and optional music."""
+    """Assemble final video from shots, voiceover, captions, SFX and optional music.
+
+    Pacing: cuts land every 2-4 s on clause boundaries (verticals/pacing.py); a
+    visual that holds longer is split into sub-shots with a different move. The
+    final pass grades the picture, burns the DYPOL captions, and QC writes qc.json
+    and a contact sheet next to the video (warnings only).
+    """
+    from .pacing import shot_groups
     log("Assembling video...")
     out_dir = Path(out_dir)
     duration = get_audio_duration(voiceover)
@@ -239,38 +354,74 @@ def assemble_video(
         from .beats import normalize_beats
         beats = normalize_beats(beats, n_segments=len(beats))[0]
     sources = build_sources(frames, out_dir, beats)
-    plan = plan_shots(sources, duration)
+    groups = shot_groups(duration, words, SHOT_TARGET_SECONDS, fps=FPS)
+    plan = plan_shots(sources, duration, durations=[sum(g) for g in groups])
+    for shot, cuts in zip(plan, groups):
+        shot["cuts"] = cuts
     (out_dir / "shot_plan.json").write_text(json.dumps([
         {**shot, "file": str(sources[shot["source"]]["path"].name) if shot["source"] is not None else "gradient",
          "kind": sources[shot["source"]]["kind"] if shot["source"] is not None else "gradient"}
         for shot in plan], indent=2), encoding="utf-8")
 
+    def _still_shot(i, img_for, shot, anim):
+        cuts = shot.get("cuts") or [shot["duration"]]
+        if len(cuts) == 1:
+            animate_frame(img_for(0), anim, shot["duration"], shot["effect"], variant=shot["variant"])
+            return
+        parts = []
+        e0 = EFFECTS.index(shot["effect"]) if shot["effect"] in EFFECTS else 0
+        for j, d in enumerate(cuts):  # each sub-shot: a new move and a tighter crop
+            part = out_dir / f"anim_{i}_{j}.mp4"
+            animate_frame(img_for(j), part, d, EFFECTS[(e0 + j) % 4], variant=shot["variant"] + j)
+            parts.append(part)
+        _concat_copy(parts, anim)
+
     def _render_shot(i, shot):
         anim = out_dir / f"anim_{i}.mp4"
+        cuts = shot.get("cuts") or [shot["duration"]]
         if shot["source"] is None:
             from .broll import _fallback_frame
-            animate_frame(_fallback_frame(200 + i, out_dir), anim, shot["duration"], shot["effect"])
+            fb = _fallback_frame(200 + i, out_dir)
+            _still_shot(i, lambda j: fb, shot, anim)
+            return anim
+        src = sources[shot["source"]]
+        whole = out_dir / f"anim_{i}_whole.mp4" if len(cuts) > 1 else anim
+        if src["kind"] == "motion":
+            try:
+                render_block(src["block"], src["data"], whole, shot["duration"])
+                if len(cuts) > 1:
+                    _recut(whole, anim, cuts, PULL_BACK)
+            except Exception as exc:  # never lose the video over one motion block
+                log(f"Motion block {src['block']} failed ({exc}); using a fallback frame")
+                from .broll import _fallback_frame
+                fb = _fallback_frame(300 + i, out_dir)
+                _still_shot(i, lambda j: fb, shot, anim)
+        elif src["kind"] == "clip":
+            render_clip_shot(src["path"], whole, shot["duration"])
+            if len(cuts) > 1:
+                _recut(whole, anim, cuts, PUNCH_IN)
         else:
-            src = sources[shot["source"]]
-            if src["kind"] == "motion":
-                try:
-                    render_block(src["block"], src["data"], anim, shot["duration"])
-                except Exception as exc:  # never lose the video over one motion block
-                    log(f"Motion block {src['block']} failed ({exc}); using a fallback frame")
-                    from .broll import _fallback_frame
-                    animate_frame(_fallback_frame(300 + i, out_dir), anim, shot["duration"], shot["effect"])
-            elif src["kind"] == "clip":
-                render_clip_shot(src["path"], anim, shot["duration"])
-            else:
-                animate_frame(src["path"], anim, shot["duration"], shot["effect"], variant=shot["variant"])
+            _still_shot(i, lambda j: src["path"], shot, anim)
         return anim
+
+    # SFX bed (whoosh/pop on beat changes, impact on the hook, clicks on typing).
+    sfx_path = None
+    if _flag("DYPOL_SFX_ENABLED"):
+        try:
+            from .sfx import plan_sfx, render_sfx_track
+            events = plan_sfx(duration, **sfx_inputs(plan, sources, words))
+            (out_dir / "sfx_plan.json").write_text(json.dumps(events, indent=2), encoding="utf-8")
+            sfx_path = render_sfx_track(events, duration, voiceover, out_dir / "sfx_track.wav")
+        except Exception as exc:
+            log(f"SFX skipped ({exc})")
+            sfx_path = None
 
     # Speed: every shot is an independent ffmpeg encode (zoompan is single-threaded),
     # so shots render concurrently; the audio mix/loudnorm passes run alongside them.
-    # Each shot's file and encode settings are unchanged, so the output is identical.
     workers = assemble_workers()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="shot") as pool:
-        audio_future = pool.submit(prepare_audio, voiceover, out_dir, duration, music_path, music_gain_db)
+        audio_future = pool.submit(prepare_audio, voiceover, out_dir, duration, music_path, music_gain_db,
+                                   sfx_path=str(sfx_path) if sfx_path else None)
         animated = list(pool.map(lambda item: _render_shot(*item), enumerate(plan)))
         audio = audio_future.result()
 
@@ -293,10 +444,11 @@ def assemble_video(
 
     out_path = MEDIA_DIR / f"verticals_{job_id}_{lang}.mp4"
     vf_parts = ["tpad=stop_mode=clone:stop_duration=1"]  # never cut the last words
+    if _flag("DYPOL_GRADE"):
+        vf_parts.append(GRADE_FILTER)
     if ass_path and Path(ass_path).exists():
         if _ffmpeg_has_libass():
-            escaped_ass = str(ass_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-            vf_parts.append(f"ass={escaped_ass}")
+            vf_parts.append(_ass_filter(ass_path))
         else:
             log(
                 "WARNING: this ffmpeg build has no libass — captions will NOT "
@@ -312,4 +464,11 @@ def assemble_video(
         "-movflags", "+faststart", str(out_path), "-y", "-loglevel", "quiet",
     ])
     log(f"Video assembled: {out_path}")
+    if _flag("DYPOL_QC_ENABLED") and out_path.exists():
+        try:
+            from .qc import run_qc
+            qc_json, contact = qc_paths(job_id, lang)
+            run_qc(out_path, qc_json, contact, merged_video=merged_video)
+        except Exception as exc:  # QC only warns
+            log(f"QC skipped ({exc})")
     return out_path

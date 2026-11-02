@@ -273,8 +273,20 @@ def cmd_produce(args):
             duck_filter=music_result.get("duck_filter"),
             music_gain_db=float(music_result.get("gain_db") or -22.0),
             beats=draft.get("beats") if lang == "en" else None,
+            words=captions_result.get("words"),
         )
         state.complete_stage("assemble", {"video_path": str(video_path)})
+        # Post-render QC (warnings only): qc.json + contact sheet ride in the draft artifact.
+        from .assemble import qc_paths
+        qc_json, qc_sheet = qc_paths(job_id, lang)
+        if qc_json.exists():
+            try:
+                qc = json.loads(qc_json.read_text(encoding="utf-8"))
+                draft[f"qc_{lang}"] = {"status": qc.get("status"), "warnings": qc.get("warnings", [])[:20],
+                                       "loudness": qc.get("loudness"), "report": str(qc_json),
+                                       "contact_sheet": str(qc_sheet) if qc_sheet.exists() else ""}
+            except (OSError, ValueError):
+                pass
         # Post-render AI visual check (no-op when the judge is disabled; never blocks).
         from .broll import judge_contact_sheet
         manifest_path = work_dir / "broll_manifest.json"

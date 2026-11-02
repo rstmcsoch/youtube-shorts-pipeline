@@ -254,6 +254,176 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return output_path
 
 
+# ─────────────────────────────────────────────────────
+# DYPOL karaoke captions (Engine B style guide)
+# ─────────────────────────────────────────────────────
+
+DYPOL_CAPTION_LANGS = {"en", "es", "pt", "de", "fr"}   # Space Grotesk covers Latin scripts only
+DYPOL_CAPTION = {
+    "font": "Space Grotesk",
+    "size": 112,              # libass size (line height); glyph em is ~size / 1.28
+    "min_size": 76,
+    "center_x": 500,          # centre of the safe band x 72-929 (right 14% is Shorts UI)
+    "center_y_frac": 0.63,    # ~63% of screen height
+    "max_width": 790,         # px at PlayRes, incl. outline; band is 857 px wide
+    "outline": 7,
+    "shadow": 4,
+}
+
+
+def _ass_colour(hex_rgb: str, alpha: int = 0) -> str:
+    h = hex_rgb.lstrip("#")
+    return f"&H{alpha:02X}{h[4:6].upper()}{h[2:4].upper()}{h[0:2].upper()}"
+
+
+def _ass_inline_colour(hex_rgb: str) -> str:
+    h = hex_rgb.lstrip("#").upper()
+    return f"&H{h[4:6]}{h[2:4]}{h[0:2]}&"
+
+
+def dypol_caption_chunks(words: list[dict], max_words: int = 4, max_chars: int = 20,
+                         pause: float = 0.35) -> list[list[dict]]:
+    """2-4 word chunks that never run across a sentence end.
+
+    Breaks after sentence punctuation (always), after a comma/colon once 2+ words
+    are in, on a pause, or when the chunk would pass max_words/max_chars. A lone
+    word then joins the chunk before it (or after it) when that keeps 4 words or
+    fewer and no sentence end is crossed, else borrows the previous chunk's last word.
+    """
+    def ends(w, marks):
+        return str(w["word"]).rstrip()[-1:] in marks
+    chunks, cur = [], []
+    for w in words:
+        if cur:
+            text_len = len(" ".join(str(x["word"]) for x in cur + [w]))
+            gap = float(w["start"]) - float(cur[-1]["end"])
+            if len(cur) >= max_words or (text_len > max_chars and len(cur) >= 2) or (gap > pause and len(cur) >= 2):
+                chunks.append(cur)
+                cur = []
+        cur.append(w)
+        if ends(w, ".!?") or (ends(w, ",;:") and len(cur) >= 2):
+            chunks.append(cur)
+            cur = []
+    if cur:
+        chunks.append(cur)
+    out = []
+    i = 0
+    while i < len(chunks):
+        c = chunks[i]
+        if len(c) == 1:
+            if out and len(out[-1]) < max_words and not ends(out[-1][-1], ".!?"):
+                out[-1] = out[-1] + c
+                i += 1
+                continue
+            if i + 1 < len(chunks) and len(chunks[i + 1]) < max_words and not ends(c[0], ".!?"):
+                chunks[i + 1] = c + chunks[i + 1]
+                i += 1
+                continue
+            if out and len(out[-1]) >= 3 and not ends(out[-1][-1], ".!?"):
+                out[-1], c = out[-1][:-1], [out[-1][-1]] + c   # borrow one word: 3 + 2
+        out.append(c)
+        i += 1
+    return out
+
+
+def _caption_font_path():
+    from .style import font_path
+    return font_path("display_bold")
+
+
+def _chunk_font_size(text: str, size: int, max_width: int, min_size: int, outline: int) -> int:
+    """Largest size <= `size` whose rendered width (Space Grotesk Bold) fits max_width."""
+    try:
+        from PIL import ImageFont
+        path = str(_caption_font_path())
+        while size > min_size:
+            f = ImageFont.truetype(path, max(8, int(size / 1.28)))
+            if f.getlength(text) + 2 * outline <= max_width:
+                break
+            size -= 4
+        return size
+    except Exception:
+        # ~0.6 em per character for a bold grotesk
+        while size > min_size and len(text) * size * 0.47 + 2 * outline > max_width:
+            size -= 4
+        return size
+
+
+def generate_dypol_ass(words: list[dict], output_path: Path, video_width: int = 1080,
+                       video_height: int = 1920) -> Path:
+    """Word-level ASS karaoke in the DYPOL look.
+
+    2-4 words per chunk, Space Grotesk Bold (vendored in style/fonts; the ass filter
+    is given that fontsdir), off-white with a slate stroke and soft shadow; the
+    word being spoken turns lime. Chunks sit centred at ~63% of the height inside
+    x 100-900, so they never enter the bottom 22% or right 14% Shorts UI. A chunk
+    too wide for the band is set smaller rather than wrapped. One Dialogue event per
+    word; events in a chunk are contiguous, so the line never flickers.
+    """
+    from .style import load_style
+    cfg = DYPOL_CAPTION
+    pal = load_style()["look"]["palette"]
+    white = _ass_colour(pal["body"])
+    lime = _ass_colour(pal["lime"])
+    stroke = _ass_colour(pal["background"])
+    shadow = _ass_colour("#000000", 0x70)
+    lime_i, white_i = _ass_inline_colour(pal["lime"]), _ass_inline_colour(pal["body"])
+    cx, cy = cfg["center_x"], int(round(video_height * cfg["center_y_frac"]))
+    header = f"""[Script Info]
+Title: DYPOL Captions
+ScriptType: v4.00+
+PlayResX: {video_width}
+PlayResY: {video_height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Dypol,{cfg['font']},{cfg['size']},{white},{lime},{stroke},{shadow},-1,0,0,0,100,100,0,0,1,{cfg['outline']},{cfg['shadow']},5,100,180,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    chunks = dypol_caption_chunks(words)
+    events = []
+    for gi, chunk in enumerate(chunks):
+        if not chunk:
+            continue
+        next_start = chunks[gi + 1][0]["start"] if gi + 1 < len(chunks) and chunks[gi + 1] else None
+        line_end = chunk[-1]["end"] + 0.25
+        if next_start is not None:
+            line_end = min(line_end, next_start)
+        line_end = max(line_end, chunk[-1]["end"])
+        plain = " ".join(str(w["word"]) for w in chunk)
+        fs = _chunk_font_size(plain, cfg["size"], cfg["max_width"], cfg["min_size"], cfg["outline"])
+        for ai, active in enumerate(chunk):
+            start = active["start"]
+            end = chunk[ai + 1]["start"] if ai + 1 < len(chunk) else line_end
+            end = max(end, start + 0.05)
+            lead = f"{{\\an5\\pos({cx},{cy})" + (f"\\fs{fs}" if fs != cfg["size"] else "")
+            if ai == 0:   # chunk enters with a small 90 ms pop
+                lead += "\\fad(60,0)\\fscx92\\fscy92\\t(0,90,\\fscx100\\fscy100)"
+            elif ai == len(chunk) - 1:
+                lead += "\\fad(0,60)"
+            lead += "}"
+            parts = []
+            for j, w in enumerate(chunk):
+                word = _ass_escape(w["word"])
+                parts.append(f"{{\\c{lime_i}}}{word}{{\\c{white_i}}}" if j == ai else word)
+            events.append(f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Dypol,,0,0,0,,"
+                          + lead + " ".join(parts))
+    Path(output_path).write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+    log(f"DYPOL ASS captions saved: {Path(output_path).name} ({len(chunks)} chunks)")
+    return Path(output_path)
+
+
+def use_dypol_captions(lang: str) -> bool:
+    import os
+    if os.environ.get("DYPOL_CAPTION_STYLE", "dypol").strip().lower() == "legacy":
+        return False
+    return (lang or "en")[:2].lower() in DYPOL_CAPTION_LANGS
+
+
 def _generate_srt(words: list[dict], output_path: Path, group_size: int = 4, smart_lines: bool = False) -> Path:
     """Generate standard SRT file from word timestamps."""
     groups = group_caption_lines(words, max_words=group_size) if smart_lines else _group_words(words, group_size=group_size)
@@ -341,13 +511,16 @@ def generate_captions(
 
     # Generate ASS for burn-in (niche-aware highlight color)
     ass_path = work_dir / f"captions_{lang}.ass"
-    _generate_ass(
-        words, ass_path,
-        highlight_color=highlight_color,
-        group_size=words_per_group,
-        font_family=font_family,
-        font_size=font_size,
-    )
+    if use_dypol_captions(lang):
+        generate_dypol_ass(words, ass_path)
+    else:
+        _generate_ass(
+            words, ass_path,
+            highlight_color=highlight_color,
+            group_size=words_per_group,
+            font_family=font_family,
+            font_size=font_size,
+        )
     result["ass_path"] = str(ass_path)
 
     return result
