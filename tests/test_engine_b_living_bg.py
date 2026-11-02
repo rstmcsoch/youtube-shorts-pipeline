@@ -103,3 +103,19 @@ def test_motion_beats_get_footage_backdrops(tmp_path):
                     "backup": True})
     out = backdrop_sources(plan, sources)
     assert out[0] == stills[0] and out[1] == stills[1]  # the hook gets footage too
+
+
+def test_gradient_only_stock_beat_becomes_a_motion_card(tmp_path):
+    import json
+    from verticals.assemble import build_sources
+    for i in range(2):
+        (tmp_path / f"broll_{i}.png").write_bytes(b"x")
+    (tmp_path / "broll_manifest.json").write_text(json.dumps({"assets": [
+        {"frame": "broll_0.png", "segment_index": 0, "provider": "pixabay"},
+        {"frame": "broll_1.png", "segment_index": 1, "provider": "gradient"}]}))
+    beats = [{"block": "stock_or_ai_still", "keywords": ["phone"]},
+             {"block": "stock_or_ai_still", "keywords": ["sensor", "blocked"]}]
+    srcs = build_sources([tmp_path / "broll_0.png", tmp_path / "broll_1.png"], tmp_path, beats)
+    motion = [s for s in srcs if s["kind"] == "motion"]
+    assert [(m["block"], m["segment"]) for m in motion] == [("diagram", 1)]
+    assert all(s.get("backup") for s in srcs if s["kind"] == "still" and s["segment"] == 1)

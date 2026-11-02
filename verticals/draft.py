@@ -273,7 +273,8 @@ def _beat_rules_text() -> dict:
         "  * kinetic_text: {\"words\": [1-4 short words, not the narration verbatim], \"accent\": \"the key word\"}\n"
         "  * count_up: {\"value\": number from the research, \"prefix\": \"$\" or \"\", \"suffix\": \"%\"/\"x\"/\"M\" or \"\", "
         "\"label\": \"what it measures (<= 6 words)\", \"source\": \"Source: <org> <announcement/report>, <month year>\"}\n"
-        "  * code_panel: {\"language\": \"bash|python|json\", \"title\": \"terminal\", \"lines\": [2-6 lines, <= 34 chars each, "
+        "  * code_panel (ONLY for a real tool's real command, API call or config that the research supports; "
+        "never invented commands such as fake system services, otherwise use a diagram): {\"language\": \"bash|python|json\", \"title\": \"terminal\", \"lines\": [2-6 lines, <= 34 chars each, "
         "shell commands start with \"$ \"; illustrative, never a real secret]}\n"
         "  * diagram: {\"title\": \"<= 3 words\", \"nodes\": [2-4 short labels in flow order]}\n"
         "  * stock_or_ai_still: {} (uses the matching b-roll prompt; only for real-world context like hardware or a place)\n"
@@ -515,7 +516,9 @@ Output JSON exactly:
         beats, number_warnings, _ = enforce_sourced_numbers(beats, research)
         draft["beats"] = beats
         warnings = (beat_warnings + number_warnings + hook_warnings(draft.get("script", ""))
-                    + structure_problems(draft.get("script", ""), beats))
+                    + structure_problems(draft.get("script", ""), beats)
+                    + [f"numbers: spoken figure not in research: {b}"
+                       for b in unsourced_spoken_numbers(draft.get("script", ""), research)])
         if warnings:
             for w in warnings:
                 log(f"Style check: {w}")

@@ -92,6 +92,23 @@ def build_sources(frames: list[Path], out_dir: Path, beats: list | None = None) 
             sources.append({"path": out_dir / f"motion_{seg}_{beat['block']}", "kind": "motion",
                             "block": beat["block"], "data": beat["data"], "provider": "dypol_motion",
                             "segment": seg, "max_uses": 1, "max_len": None})
+    # A stock beat whose only visual is a gradient fallback (no stock, no FLUX, no clip) becomes a
+    # diagram/kinetic card from its keywords: a flat gradient shot reads as an empty screen (draft 4).
+    seg_rows = {}
+    for i, r in enumerate(rows):
+        seg_rows.setdefault(r.get("segment_index", i), []).append(r)
+    for seg, beat in enumerate(beats or []):
+        if not isinstance(beat, dict) or seg in motion_segments or beat.get("block") in MOTION_KINDS:
+            continue
+        rs = seg_rows.get(seg, [])
+        if rs and all(r.get("provider") == "gradient" and not (r.get("clip") or {}).get("file") for r in rs):
+            kw = [str(k) for k in beat.get("keywords") or []]
+            nodes = [k[:1].upper() + k[1:] for k in kw][:4]
+            block, data = ("diagram", {"nodes": nodes, "title": ""}) if len(nodes) >= 2 else \
+                ("kinetic_text", {"words": (kw or ["key", "point"])[:3], "accent": (kw or ["point"])[0]})
+            motion_segments.add(seg)
+            sources.append({"path": out_dir / f"motion_{seg}_{block}", "kind": "motion", "block": block,
+                            "data": data, "provider": "dypol_motion", "segment": seg, "max_uses": 1, "max_len": None})
     by_name = {r.get("frame"): r for r in rows}
     seen = set()
     ordered = [(Path(f), by_name.get(Path(f).name, rows[i] if i < len(rows) else {})) for i, f in enumerate(frames)]
