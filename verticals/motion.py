@@ -12,11 +12,13 @@ caption line (~63% of height): content lives in x 72-930, y 170-1080.
 
 import math
 import subprocess
+import threading
 from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .icons import icon_sprite, pick_icon
 from .style import color, font_path, screen
 
 W, H, FPS = screen()
@@ -71,7 +73,14 @@ def fit_size(text_list, role: str, start: int, max_w: int, min_size: int = 40) -
     return size
 
 
+_LOCAL = threading.local()  # the living background frame for the block being rendered (per thread)
+
+
 def base_canvas(grid: bool = False) -> Image.Image:
+    bg = getattr(_LOCAL, "bg", None)
+    if bg is not None:  # a fresh frame from Backdrop.frame(); used once, so no copy
+        _LOCAL.bg = None
+        return bg
     return _base_template(grid).copy()
 
 
@@ -126,16 +135,42 @@ def text_sprite(text: str, f, fill) -> Image.Image:
 _DRIFT = 1.0
 
 
+def draw_hero_icon(img: Image.Image, name: str, cx: float, cy: float, size: int, t: float, appear: float,
+                   colour: str = "cyan") -> None:
+    """An icon that floats along a small orbit with a rotating arc ring around it: never still."""
+    if appear <= 0.01:
+        return
+    amb = _DRIFT
+    ox = 26 * math.sin(t * 1.3) * amb
+    oy = 18 * math.sin(t * 2.1 + 0.8) * amb
+    x, y = cx + ox, cy + oy - (1 - appear) * 60
+    d = ImageDraw.Draw(img)
+    bg = color("background")
+    r = size * 0.78
+    d.ellipse([x - r, y - r, x + r, y + r], fill=mix(bg, color("panel"), appear),
+              outline=mix(bg, color("border"), appear), width=3)
+    a0 = (t * 140 * amb) % 360
+    d.arc([x - r - 12, y - r - 12, x + r + 12, y + r + 12], a0, a0 + 110, fill=mix(bg, color(colour), appear), width=6)
+    d.arc([x - r - 12, y - r - 12, x + r + 12, y + r + 12], a0 + 180, a0 + 230, fill=mix(bg, color("lime"), appear),
+          width=6)
+    spr = icon_sprite(name, size, color(colour))
+    paste_scaled(img, spr, x, y, 0.85 + 0.15 * appear, appear)
+
+
 # ── kinetic_text ─────────────────────────────────────
 def frame_kinetic_text(data: dict, t: float, duration: float) -> Image.Image:
     words = data["words"][:4]
     accent = data.get("accent") or words[-1]
     size = fit_size(words, "display_bold", 190 if len(words) <= 2 else 168, int((RIGHT - LEFT - 20) / 1.04))
+    icon_band = 330  # the hero icon lives above the words
+    size = min(size, int((BOTTOM - TOP - icon_band - 40) / max(1, len(words)) / 1.08))
     f = font("display_bold", size)
     line_h = int(size * 1.08)
     block_h = line_h * len(words)
-    y0 = (TOP + BOTTOM) / 2 - block_h / 2 + line_h / 2
+    y0 = TOP + icon_band + (BOTTOM - TOP - icon_band) / 2 - block_h / 2 + line_h / 2
     img = base_canvas()
+    icon = data.get("icon") or pick_icon(words)
+    draw_hero_icon(img, icon, LEFT + 150, TOP + 150, 150, t, ease_out_cubic(progress(t, 0.0, 0.4)))
     drift = 1 + 0.035 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT  # slow push
     for i, word in enumerate(words):
         start = 0.10 + i * 0.26
@@ -150,6 +185,18 @@ def frame_kinetic_text(data: dict, t: float, duration: float) -> Image.Image:
         else:  # slide in from the left
             off = (1 - ease_out_cubic(p)) * -140
             paste_scaled(img, spr, 0, cy, drift, ease_out_cubic(p), anchor_left=LEFT + off)
+        if is_accent:  # underline draws under the key word, then a light runs along it
+            up = ease_in_out_cubic(progress(t, start + 0.35, 0.45))
+            if up > 0:
+                d = ImageDraw.Draw(img)
+                uy = cy + size * 0.55
+                uw = (spr.width - 16) * drift * up
+                d.rounded_rectangle([LEFT, uy, LEFT + uw, uy + 10], radius=5, fill=color("lime"))
+                if up >= 1 and _DRIFT:
+                    k = ((t - start - 0.8) * 0.6) % 1.0
+                    sx = LEFT + uw * k
+                    d.rounded_rectangle([sx - 40, uy - 3, sx + 40, uy + 13], radius=8,
+                                        fill=mix(color("lime"), (255, 255, 255), 0.6))
     return img
 
 
@@ -180,7 +227,7 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
     num_color = mix(body, lime, done_flash)
     drift = 1 + 0.03 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT
     f = font("display_bold", int(size * drift))
-    cy = 560
+    cy = 600
     draw_tag(img, "BY THE NUMBERS", TOP + 10, progress(t, 0.0, 0.25))
     d.text((LEFT, cy), text, font=f, fill=num_color, anchor="lm")
     # meter that fills with the count
@@ -189,6 +236,11 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
     d.rounded_rectangle([LEFT, my, LEFT + full_w, my + 14], radius=7, fill=color("border"))
     if k > 0.01:
         d.rounded_rectangle([LEFT, my, LEFT + max(14, full_w * k), my + 14], radius=7, fill=lime)
+        if k >= 0.99 and _DRIFT:  # a light keeps running along the full meter
+            sx = LEFT + full_w * ((t * 0.5) % 1.0)
+            d.rounded_rectangle([sx - 50, my - 3, sx + 50, my + 17], radius=9, fill=mix(lime, (255, 255, 255), 0.55))
+    icon = data.get("icon") or pick_icon(data.get("label", ""), default="chip")
+    draw_hero_icon(img, icon, RIGHT - 120, TOP + 190, 100, t, ease_out_cubic(progress(t, 0.1, 0.4)), "amber")
     label = data.get("label", "")
     if label:
         lp = 1.0 if settled else ease_out_cubic(progress(t, 0.45, 0.35))
@@ -319,6 +371,9 @@ def frame_code_panel(data: dict, t: float, duration: float) -> Image.Image:
         remaining -= len(shown[i])
         if remaining < 0:
             break
+    if _DRIFT:  # a soft scan line sweeps down the panel, all the time
+        sy = y0 + bar_h + ((t * 220) % max(1, panel_h - bar_h))
+        d.rectangle([x0 + 2, sy, x1 - 2, sy + 3], fill=mix(panel, color("cyan"), 0.35))
     if cursor is not None and (not done or int(t * 2.2) % 2 == 0):
         cx, cy = cursor
         d.rectangle([cx + 3, cy + 4, cx + 3 + cw * 0.9, cy + fsz + 4], fill=color("lime"))
@@ -351,7 +406,8 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
     draw_tag(img, title, TOP + 10, progress(t, 0.0, 0.25))
 
     step = diagram_step(n, duration)
-    size = fit_size(nodes, "display_medium", 58, box_w - 80, 34)
+    centers = []
+    size = fit_size(nodes, "display_medium", 58, box_w - 200, 34)
     f = font("display_medium", size)
     active = min(n - 1, int(max(0.0, t - 0.15) / step))
     revealed = 0.15 + (n - 1) * step + 0.32
@@ -381,7 +437,10 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
             edge, width = border, 2
         grow = 0.9 + 0.1 * p
         w2, h2 = box_w * grow / 2, box_h * grow / 2
-        cx, cy = bx0 + box_w / 2, y + box_h / 2
+        slide = (1 - ease_out_cubic(progress(t, start, 0.45))) * 160  # cards slide in from the right
+        bob = 5 * math.sin(t * 1.7 + i * 1.3) * _DRIFT
+        cx, cy = bx0 + box_w / 2 + slide, y + box_h / 2 + bob
+        centers.append((cx, cy, h2, a))
         fill = mix(bg, panel, a)
         if i == active:
             fill = mix(fill, edge, 0.22 * a)
@@ -390,10 +449,24 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
             d.rounded_rectangle([cx - w2 - 10, cy - h2 - 10, cx + w2 + 10, cy + h2 + 10], radius=22, fill=glow)
         d.rounded_rectangle([cx - w2, cy - h2, cx + w2, cy + h2], radius=14, fill=fill,
                             outline=mix(bg, edge, a), width=width)
-        d.text((cx, cy), label, font=f, fill=mix(bg, body, a), anchor="mm")
+        icon_name = pick_icon(label, default=("chip", "server", "check", "shield")[i % 4])
+        spr = icon_sprite(icon_name, 64, color("cyan") if i != n - 1 else color("lime"))
+        paste_scaled(img, spr, cx - w2 + 70, cy + 4, 1.0, a)
+        d.text((cx + 34, cy), label, font=f, fill=mix(bg, body, a), anchor="mm")
         # step number in mono
         d.text((cx - w2 + 24, cy - h2 + 16), f"0{i + 1}", font=font("mono", 26),
                fill=mix(bg, color("muted"), a))
+    # a signal travels down the flow, hop by hop, looping through the revealed steps
+    shown = [c for c in centers if c[3] > 0.9]
+    if len(shown) >= 2 and _DRIFT:
+        hop = 0.9
+        pos = (t * 1.0 / hop) % (len(shown) - 1)
+        k = int(pos)
+        frac = ease_in_out_cubic(pos - k)
+        (ax, ay, ah, _), (bx, by, bh, _) = shown[k], shown[k + 1]
+        fx, fy = ax + (bx - ax) * frac, (ay + ah) + ((by - bh) - (ay + ah)) * frac
+        for j, (r, al) in enumerate(((22, 0.25), (14, 0.6), (8, 1.0))):
+            d.ellipse([fx - r, fy - r, fx + r, fy + r], fill=mix(bg, color("lime"), al))
     return img
 
 
@@ -426,7 +499,7 @@ def render_frame(kind: str, data: dict, t: float, duration: float) -> Image.Imag
 
 
 def render_block(kind: str, data: dict, out_path: Path, duration: float, fps: int = FPS,
-                 t_offset: float = 0.0, total: float | None = None) -> Path:
+                 t_offset: float = 0.0, total: float | None = None, backdrop=None, bg_t0: float = 0.0) -> Path:
     """Render one motion block to an H.264 mp4 (same settings as the other shots).
 
     `t_offset`/`total` render a window [t_offset, t_offset + duration] of a block whose
@@ -440,10 +513,14 @@ def render_block(kind: str, data: dict, out_path: Path, duration: float, fps: in
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         for i in range(n_frames):
+            # living background: footage or drifting glow/grid/particles, continuous across sub-shots
+            _LOCAL.bg = backdrop.frame(bg_t0 + i / fps) if backdrop is not None else None
             proc.stdin.write(render_frame(kind, data, t_offset + i / fps, total).tobytes())
         proc.stdin.close()
     except BrokenPipeError:
         pass
+    finally:
+        _LOCAL.bg = None
     err = proc.stderr.read().decode(errors="replace")
     if proc.wait() != 0:
         raise RuntimeError(f"ffmpeg failed rendering {kind}: {err[-400:]}")

@@ -24,6 +24,8 @@ import re
 from .style import block_kinds, block_limits, hook_rules, max_same_run, load_style
 
 ROLES = ("hook", "how", "catch", "takeaway")
+TEXT_DOMINANT = ("kinetic_text", "code_panel")  # mostly words on screen
+MAX_TEXT_RUN = 2
 MOTION = ("kinetic_text", "count_up", "code_panel", "diagram")
 # a limitation / trade-off sentence for the "catch" beat
 CATCH_RE = re.compile(r"\b(the catch|catch is|but|however|limit(s|ation|ed)?|can't|cannot|fail(s|ed)?|struggle(s)?|"
@@ -246,6 +248,15 @@ def normalize_beats(raw, n_segments: int = 8, prompts: list | None = None) -> tu
         if beats[j]["block"] == STOCK:
             _convert(beats, j, kinds, "too many stills", warnings, {STOCK})
 
+    # At most 2 text-dominant blocks (kinetic_text / code_panel) in a row: the middle of a
+    # run of 3 becomes a diagram / count_up (visual) where the data allows.
+    for i in range(MAX_TEXT_RUN, len(beats)):
+        window = [b["block"] for b in beats[i - MAX_TEXT_RUN:i + 1]]
+        if all(k in TEXT_DOMINANT for k in window):
+            j = i - 1 if i - 1 > 0 else i
+            if not _convert(beats, j, kinds, "3 text-dominant blocks in a row", warnings, set(TEXT_DOMINANT)):
+                _convert(beats, i, kinds, "3 text-dominant blocks in a row", warnings, set(TEXT_DOMINANT))
+
     # Last resort for degenerate input (one-word keywords, no data): variety beats the caps.
     for i in range(limit, len(beats)):
         window = [b["block"] for b in beats[i - limit:i + 1]]
@@ -263,6 +274,12 @@ def normalize_beats(raw, n_segments: int = 8, prompts: list | None = None) -> tu
     for b in beats:
         b.pop("raw", None)
     return beats, warnings
+
+
+def text_run_ok(beats: list[dict]) -> bool:
+    kinds = [b.get("block") for b in beats]
+    return not any(all(k in TEXT_DOMINANT for k in kinds[i - MAX_TEXT_RUN:i + 1])
+                   for i in range(MAX_TEXT_RUN, len(kinds)))
 
 
 def has_role(beats: list[dict], role: str) -> bool:

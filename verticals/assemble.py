@@ -10,6 +10,7 @@ from pathlib import Path
 from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PROVIDERS
 from .config import MEDIA_DIR, run_cmd
 from .log import log
+from .backdrop import Backdrop
 from .motion import MOTION_KINDS, code_typing_window, motion_cards, render_block
 from .style import STYLE_DIR
 
@@ -22,6 +23,9 @@ ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "y
 # inside the safe band x 72-929, y <= 1080), cut on alternate sub-shots.
 PUNCH_IN = "scale=1210:2150,crop=1080:1920"
 PULL_BACK = "scale=994:1766,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x0F141C"
+# With a living background a pull-back would frame the shot in a flat slate border, so
+# motion sub-shots get a gentle 5% punch-in instead (text stays inside x >= 48).
+MOTION_PUNCH = "scale=1134:2016,crop=1080:1920"
 # Final grade: light contrast, soft vignette, subtle temporal grain. Applied before captions.
 GRADE_FILTER = "eq=contrast=1.06:saturation=1.05:brightness=-0.008,vignette=angle=PI/5,noise=alls=4:allf=t"
 
@@ -191,6 +195,40 @@ def final_motion_shot(plan: list[dict], sources: list[dict]) -> list[dict]:
         last.update(source=pick, effect=EFFECTS[0], variant=0)
         log(f"Final shot was a {src.get('kind', 'gradient')}; using motion block {sources[pick]['block']} instead")
     return plan
+
+
+def backdrop_sources(plan: list[dict], sources: list[dict]) -> dict:
+    """Shot index -> footage path to run (blurred, darkened, Ken Burns) behind a motion block.
+
+    Uses the beat's own segment clip/still first (clips before stills), never a gradient
+    and never an asset that is already a shot of its own. The hook and middle beats fall
+    back to the nearest segment's footage; the rest get the procedural living background.
+    """
+    used = {s["source"] for s in plan if s["source"] is not None}
+    taken, out = set(), {}
+    motion_shots = [(k, sources[shot["source"]]) for k, shot in enumerate(plan)
+                    if shot["source"] is not None and sources[shot["source"]].get("kind") == "motion"]
+
+    def free():
+        return [j for j, s in enumerate(sources)
+                if s.get("kind") in ("clip", "still") and j not in used and j not in taken
+                and s.get("provider") != "gradient" and Path(s["path"]).exists()]
+
+    for k, src in motion_shots:  # pass 1: each beat's own segment
+        seg = src.get("segment", 0)
+        same = sorted((j for j in free() if sources[j].get("segment") == seg), key=lambda j: sources[j]["kind"] != "clip")
+        if same:
+            out[k] = sources[same[0]]["path"]
+            taken.add(same[0])
+    for k, src in motion_shots:  # pass 2: hook and middle borrow the nearest leftover footage
+        if k in out or k == len(plan) - 1:
+            continue
+        seg = src.get("segment", 0)
+        near = sorted(free(), key=lambda j: (abs(sources[j].get("segment", 0) - seg), sources[j]["kind"] != "clip"))
+        if near:
+            out[k] = sources[near[0]]["path"]
+            taken.add(near[0])
+    return out
 
 
 def kinetic_runtime_share(plan: list[dict], sources: list[dict]) -> float:
@@ -415,6 +453,9 @@ def assemble_video(
         shot["cuts"] = cuts
     plan = final_motion_shot(plan, sources)
     starts = shot_timeline(plan)
+    backdrops = backdrop_sources(plan, sources) if _flag("DYPOL_LIVING_BG") else {}
+    for k, path in backdrops.items():
+        plan[k]["backdrop"] = Path(path).name
     log(f"Kinetic-text share of runtime: {kinetic_runtime_share(plan, sources):.0%}")
     (out_dir / "shot_plan.json").write_text(json.dumps([
         {**shot, "file": str(sources[shot["source"]]["path"].name) if shot["source"] is not None else "gradient",
@@ -446,18 +487,23 @@ def assemble_video(
         whole = out_dir / f"anim_{i}_whole.mp4" if len(cuts) > 1 else anim
         if src["kind"] == "motion":
             try:
+                bd = None
+                if _flag("DYPOL_LIVING_BG"):  # never a flat, static background behind a motion block
+                    bd = Backdrop(backdrops.get(i), seed=i, duration=shot["duration"])
                 if len(cuts) > 1 and src["block"] in ("kinetic_text", "count_up"):
                     # a new card per sub-shot, following the narration (never one card for 8 s)
                     parts = []
+                    t_bg = 0.0
                     for j, spec in enumerate(motion_cards(src["block"], src["data"], cuts, starts[i], words)):
                         part = out_dir / f"anim_{i}_{j}.mp4"
-                        render_block(spec["kind"], spec["data"], part, spec["duration"])
+                        render_block(spec["kind"], spec["data"], part, spec["duration"], backdrop=bd, bg_t0=t_bg)
                         parts.append(part)
+                        t_bg += spec["duration"]
                     _concat_copy(parts, anim)
                     return anim
-                render_block(src["block"], src["data"], whole, shot["duration"])
+                render_block(src["block"], src["data"], whole, shot["duration"], backdrop=bd)
                 if len(cuts) > 1:
-                    _recut(whole, anim, cuts, PULL_BACK)
+                    _recut(whole, anim, cuts, MOTION_PUNCH if bd is not None else PULL_BACK)
             except Exception as exc:  # never lose the video over one motion block
                 log(f"Motion block {src['block']} failed ({exc}); using a fallback frame")
                 from .broll import _fallback_frame
