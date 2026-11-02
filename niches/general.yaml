@@ -13,8 +13,8 @@ script:
       template: "This just happened and you need to know about it."
       when: "recent event"
     - id: explainer
-      template: "Let me explain {topic} in 60 seconds."
-      when: "complex topic"
+      template: "{concrete_number_or_fact}. Here's how {topic} really works."
+      when: "complex topic; open on the number, never on setup"
     - id: question
       template: "Why is everyone talking about {topic}? Here's the real story."
       when: "trending topic"

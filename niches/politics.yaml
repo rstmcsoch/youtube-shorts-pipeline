@@ -10,7 +10,7 @@ script:
       template: "This just happened in the world of politics."
       when: "recent event"
     - id: explainer
-      template: "Let me break down {topic} in 60 seconds."
+      template: "{concrete_number_or_fact}. Here is what that means for {topic}."
       when: "complex topic"
   cta_variants:
     - "Follow for more."

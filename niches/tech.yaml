@@ -23,8 +23,8 @@ script:
       template: "{topic} changes everything. Here's what happens next."
       when: "major announcement or product launch with downstream implications"
     - id: explainer
-      template: "Let me explain {topic} in 60 seconds because most people are getting this wrong."
-      when: "complex topic with widespread misunderstanding"
+      template: "{concrete_number_or_fact} - that's how {topic} actually works, and it's not what you think."
+      when: "complex topic with widespread misunderstanding; open on the surprising number, never on setup"
     - id: comparison
       template: "{thing_a} vs {thing_b}. One of these wins and it's not close."
       when: "two competing products, companies, or approaches"

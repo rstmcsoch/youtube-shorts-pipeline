@@ -92,3 +92,12 @@ def test_enforce_hook_takes_a_better_rewrite(monkeypatch):
 def test_transitions_sit_under_the_hook_impact():
     assert TRANSITION_GAIN["whoosh"] <= -5 and TRANSITION_GAIN["pop"] <= -5
     assert TRANSITION_GAIN["impact"] > TRANSITION_GAIN["whoosh"]
+
+
+def test_no_niche_hook_template_is_setup():
+    import yaml
+    from verticals.beats import INTRO_RE
+    for p in Path(__file__).resolve().parent.parent.joinpath("niches").glob("*.yaml"):
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        for h in (data.get("script") or {}).get("hooks") or []:
+            assert not INTRO_RE.search(str(h.get("template", ""))), (p.name, h)
