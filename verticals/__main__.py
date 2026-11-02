@@ -272,6 +272,7 @@ def cmd_produce(args):
             music_path=music_result.get("track_path") or None,
             duck_filter=music_result.get("duck_filter"),
             music_gain_db=float(music_result.get("gain_db") or -22.0),
+            beats=draft.get("beats") if lang == "en" else None,
         )
         state.complete_stage("assemble", {"video_path": str(video_path)})
         # Post-render AI visual check (no-op when the judge is disabled; never blocks).

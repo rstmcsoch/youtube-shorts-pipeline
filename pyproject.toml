@@ -21,6 +21,7 @@ dependencies = [
     "PyYAML>=6.0,<7.0",
     "edge-tts>=7.0,<8.0",
     "kokoro-onnx>=0.6.1,<0.7",
+    "Pygments>=2.15,<3.0",
 ]
 
 [project.optional-dependencies]

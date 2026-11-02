@@ -10,6 +10,7 @@ from pathlib import Path
 from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PROVIDERS
 from .config import MEDIA_DIR, run_cmd
 from .log import log
+from .motion import MOTION_KINDS, render_block
 
 EFFECTS = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
 SHOT_TARGET_SECONDS = 4.0
@@ -54,14 +55,26 @@ def get_audio_duration(path: Path) -> float:
 # Shot plan
 # ─────────────────────────────────────────────────────
 
-def build_sources(frames: list[Path], out_dir: Path) -> list[dict]:
-    """Visual sources from the b-roll manifest: per segment an optional clip, then the still."""
+def build_sources(frames: list[Path], out_dir: Path, beats: list | None = None) -> list[dict]:
+    """Visual sources from the b-roll manifest: per segment an optional clip, then the still.
+
+    Beats whose block is a motion kind (kinetic_text, count_up, code_panel, diagram)
+    add a rendered motion source for that segment; the segment's still becomes a
+    backup the planner uses only when nothing else is left nearby.
+    """
     out_dir = Path(out_dir)
     try:
         rows = json.loads((out_dir / "broll_manifest.json").read_text(encoding="utf-8")).get("assets", [])
     except (OSError, ValueError, AttributeError):
         rows = []
     sources = []
+    motion_segments = set()
+    for seg, beat in enumerate(beats or []):
+        if isinstance(beat, dict) and beat.get("block") in MOTION_KINDS and isinstance(beat.get("data"), dict):
+            motion_segments.add(seg)
+            sources.append({"path": out_dir / f"motion_{seg}_{beat['block']}", "kind": "motion",
+                            "block": beat["block"], "data": beat["data"], "provider": "dypol_motion",
+                            "segment": seg, "max_uses": 1, "max_len": None})
     by_name = {r.get("frame"): r for r in rows}
     seen = set()
     ordered = [(Path(f), by_name.get(Path(f).name, rows[i] if i < len(rows) else {})) for i, f in enumerate(frames)]
@@ -80,9 +93,12 @@ def build_sources(frames: list[Path], out_dir: Path) -> list[dict]:
                             "segment": seg, "max_uses": 1,
                             "max_len": float(clip.get("duration_seconds") or SHOT_TARGET_SECONDS)})
         provider = row.get("provider", "")
-        sources.append({"path": path, "kind": "still", "provider": provider, "segment": seg,
-                        "max_uses": int(row.get("max_uses") or max_uses_for(provider)),
-                        "max_len": 5.0 if provider in THIRD_PARTY_PROVIDERS else None})
+        still = {"path": path, "kind": "still", "provider": provider, "segment": seg,
+                 "max_uses": int(row.get("max_uses") or max_uses_for(provider)),
+                 "max_len": 5.0 if provider in THIRD_PARTY_PROVIDERS else None}
+        if seg in motion_segments:
+            still.update(max_uses=1, backup=True)
+        sources.append(still)
     return sources
 
 
@@ -108,7 +124,8 @@ def plan_shots(sources: list[dict], duration: float, target: float = SHOT_TARGET
                 continue
             dist = abs(src.get("segment", 0) - seg_target)
             behind = src.get("segment", 0) < seg_target
-            key = (dist > 1, uses[idx], dist, behind, 0 if src.get("kind") == "clip" else 1, idx)
+            key = (dist > 1, bool(src.get("backup")), uses[idx], dist, behind,
+                   0 if src.get("kind") in ("motion", "clip") else 1, idx)
             if best_key is None or key < best_key:
                 best, best_key = idx, key
         if best is None:
@@ -211,13 +228,17 @@ def assemble_video(
     music_path: str | None = None,
     duck_filter: str | None = None,  # legacy; music is now ducked with sidechaincompress
     music_gain_db: float = -22.0,
+    beats: list | None = None,
 ) -> Path:
     """Assemble final video from shots, voiceover, captions, and optional music."""
     log("Assembling video...")
     out_dir = Path(out_dir)
     duration = get_audio_duration(voiceover)
 
-    sources = build_sources(frames, out_dir)
+    if beats:
+        from .beats import normalize_beats
+        beats = normalize_beats(beats, n_segments=len(beats))[0]
+    sources = build_sources(frames, out_dir, beats)
     plan = plan_shots(sources, duration)
     (out_dir / "shot_plan.json").write_text(json.dumps([
         {**shot, "file": str(sources[shot["source"]]["path"].name) if shot["source"] is not None else "gradient",
@@ -231,7 +252,14 @@ def assemble_video(
             animate_frame(_fallback_frame(200 + i, out_dir), anim, shot["duration"], shot["effect"])
         else:
             src = sources[shot["source"]]
-            if src["kind"] == "clip":
+            if src["kind"] == "motion":
+                try:
+                    render_block(src["block"], src["data"], anim, shot["duration"])
+                except Exception as exc:  # never lose the video over one motion block
+                    log(f"Motion block {src['block']} failed ({exc}); using a fallback frame")
+                    from .broll import _fallback_frame
+                    animate_frame(_fallback_frame(300 + i, out_dir), anim, shot["duration"], shot["effect"])
+            elif src["kind"] == "clip":
                 render_clip_shot(src["path"], anim, shot["duration"])
             else:
                 animate_frame(src["path"], anim, shot["duration"], shot["effect"], variant=shot["variant"])

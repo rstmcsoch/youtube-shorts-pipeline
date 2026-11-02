@@ -369,6 +369,20 @@ def scan_text(text) -> list[str]:
     return sorted(set(hits), key=str.casefold)
 
 
+def beat_screen_text(beat) -> str:
+    """All on-screen text of a motion beat (words, labels, code, diagram nodes) as one string."""
+    if not isinstance(beat, dict) or not isinstance(beat.get("data"), dict):
+        return ""
+    parts = []
+    for value in beat["data"].values():
+        if isinstance(value, list):
+            parts.append(" ".join(map(str, value)) if all(isinstance(v, str) and " " not in v for v in value)
+                         else ". ".join(map(str, value)))
+        elif isinstance(value, str):
+            parts.append(value)
+    return ". ".join(p for p in parts if p.strip())
+
+
 def draft_fields(draft: dict) -> dict:
     fields = {}
     for key in DRAFT_FIELDS:
@@ -380,6 +394,10 @@ def draft_fields(draft: dict) -> dict:
     for index, intent in enumerate(draft.get("visual_intents", []) or []):
         if isinstance(intent, dict) and intent.get("entities"):
             fields["visual_intents[" + str(index) + "].entities"] = ", ".join(map(str, intent["entities"]))
+    for index, beat in enumerate(draft.get("beats", []) or []):
+        text = beat_screen_text(beat)
+        if text:
+            fields["beats[" + str(index) + "]"] = text
     metadata = draft.get("upload_metadata") or {}
     for key in ("title", "description", "tags"):
         if key in metadata:

@@ -15,6 +15,8 @@ from .log import log
 from .name_gate import find_names, flagged_phrases
 from .niche import load_niche, get_script_context, get_visual_context, get_visual_prompt_suffix
 from .research import research_topic
+from .beats import normalize_beats, hook_warnings
+from .style import block_kinds, hook_rules, load_style
 
 
 def _call_claude(prompt: str) -> str:
@@ -209,6 +211,39 @@ def _enforce_no_personal_names(draft: dict, prompt: str, provider: str | None, f
     return retry
 
 
+def _beat_rules_text() -> dict:
+    """Prompt rules built from style/style.guide.yaml (hook timing + shot-list block kinds)."""
+    style = load_style()
+    hook = hook_rules()
+    wpm = int(style["pace"]["target_wpm"])
+    number_words = int(hook["number_by_s"] * wpm / 60)
+    stakes_words = int(hook["stakes_by_s"] * wpm / 60)
+    kinds = ", ".join(block_kinds())
+    run = int(style["variety"]["max_same_kind_in_a_row"])
+    hook_text = (
+        f"- HOOK TIMING (narration is read at ~{wpm} words per minute): the first spoken word is the hook itself "
+        f"(no intro, no greeting, no music-only opening). Say why it matters (the stakes) within the first "
+        f"{stakes_words} words (~{hook['stakes_by_s']:g} s). Say one concrete number within the first "
+        f"{number_words} words (~{hook['number_by_s']:g} s)."
+    )
+    beats_text = (
+        f"- SHOT LIST: emit exactly one beat per b-roll prompt (same count, same order) in \"beats\". Each beat has "
+        f"\"block\" (one of: {kinds}; nothing else), \"keywords\" (2-5 on-screen keywords from that segment), "
+        f"\"fallback\" (a different block kind from the same list, used if this one can't render) and \"data\":\n"
+        "  * kinetic_text: {\"words\": [1-4 short words, not the narration verbatim], \"accent\": \"the key word\"}\n"
+        "  * count_up: {\"value\": number from the research, \"prefix\": \"$\" or \"\", \"suffix\": \"%\"/\"x\"/\"M\" or \"\", "
+        "\"label\": \"what it measures (<= 6 words)\", \"source\": \"Source: <org> <announcement/report>, <month year>\"}\n"
+        "  * code_panel: {\"language\": \"bash|python|json\", \"title\": \"terminal\", \"lines\": [2-6 lines, <= 34 chars each, "
+        "shell commands start with \"$ \"; illustrative, never a real secret]}\n"
+        "  * diagram: {\"title\": \"<= 3 words\", \"nodes\": [2-4 short labels in flow order]}\n"
+        "  * stock_or_ai_still: {} (uses the matching b-roll prompt; only for real-world context like hardware or a place)\n"
+        f"  Rules: beat 1 (the hook) is a proof block (count_up, kinetic_text, diagram or code_panel), never stock_or_ai_still. "
+        f"Never put the same block kind more than {run} times in a row. Use count_up whenever a beat states a number. "
+        "Use stock_or_ai_still for at most 2 beats. All on-screen text follows the no-personal-names rule."
+    )
+    return {"hook": hook_text, "beats": beats_text}
+
+
 def generate_draft(
     news: str,
     channel_context: str = "",
@@ -274,6 +309,7 @@ def generate_draft(
             thumb_guidance = "\nTHUMBNAIL GUIDANCE:\n" + "\n".join(tg_parts)
 
     channel_note = f"\nChannel context: {channel_context}" if channel_context else ""
+    beat_rules = _beat_rules_text()
     feedback_note = reviewer_feedback_block(reviewer_feedback_text(reviewer_feedback))
 
     prompt = f"""You are writing a {platform_label} script of {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words (45-75 seconds spoken; aim for about 145 words).{channel_note}
@@ -294,14 +330,16 @@ RULES:
 - STRICT DYPOL PRIVACY/STYLE RULE: Do not include any personal names of real people anywhere in any output field. This applies to the narration script, YouTube title, YouTube description, tags, Instagram caption, TikTok caption, thumbnail prompt, and every b-roll prompt. Do not name public figures, executives, creators, politicians, researchers, or any other individual, even when their names appear in the topic or research. Refer to people only by role or generic description (for example, "the company's CEO", "a technology researcher", or "the platform's founder"). Company, product, organization, and place names are allowed when relevant; individual people's names are not.
 - Before returning JSON, review every field and remove personal names, including names embedded in quoted text, examples, hashtags, or thumbnail/on-screen-text instructions. If the topic cannot be covered accurately without a person's name, rewrite it as a general explanation rather than including the name.
 - HOOK (first ~1.5 seconds): the very first sentence is the hook. It must be at most 10 words, start with the most surprising concrete fact, number, or tension in the story, and work even with the sound off as an on-screen caption. No greeting, no channel name, no "in this video", no "let me explain", no setup before the hook.
+{beat_rules['hook']}
 - The first broll_prompt / visual_intent must be the single most striking, high-motion visual for the story (it is the opening shot): concrete and immediately readable, never an abstract background.
 - LENGTH: the script must be {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words so the voiceover lands between 45 and 75 seconds.
 - Follow the TONE, PACING, and HOOK PATTERNS from the niche profile above
 - Pick the most appropriate hook pattern for this specific topic
-- Use one of the CTA OPTIONS at the end
+- NO call to action at the end (no subscribe, like, follow or comment ask, even if the niche profile lists CTA options). End on one closing line: an opinion or a forward look.
 - Never use any of the NEVER USE phrases
 - B-roll prompts must follow the visual guidance (style, mood, preferred subjects), without personal names or recognizable depictions of named individuals
 - Emit exactly 8 broll_prompts and 8 matching visual_intents, one per ~8 seconds of narration, in script order. Each b-roll prompt must describe a concrete, photographable scene or object (hardware, people's hands at work, server rooms, city at night, security operations room) and must NEVER show screens with code, readable text, numbers, labels, logos, or user interfaces.
+{beat_rules['beats']}
 - Each visual intent Each intent must include type (news_event, product, concept, data, or transition), segment, entities (company/product/place only, never personal names), keywords, and real_image_essential (boolean). Use news_event/product only for a specific real-world event or identifiable product; concept/data/transition for general illustrations. Set real_image_essential=true only when the segment would be misleading without an authentic image.
 
 Output JSON exactly:
@@ -310,6 +348,9 @@ Output JSON exactly:
   "broll_prompts": ["prompt for frame 1", "prompt for frame 2", "prompt for frame 3", "prompt for frame 4", "prompt for frame 5", "prompt for frame 6", "prompt for frame 7", "prompt for frame 8"],
   "visual_intents": [
     {{"type":"news_event|product|concept|data|transition","segment":"matching narration segment","entities":["company or product"],"keywords":["visual keywords"],"real_image_essential":false}}
+  ],
+  "beats": [
+    {{"block":"kinetic_text","keywords":["..."],"fallback":"stock_or_ai_still","data":{{"words":["10x","cheaper"],"accent":"cheaper"}}}}
   ],
   "youtube_title": "...",
   "youtube_description": "...",
@@ -367,6 +408,15 @@ Output JSON exactly:
         suffix = get_visual_prompt_suffix(profile)
         if suffix and "broll_prompts" in draft:
             draft["broll_prompts"] = [f"{p}. {suffix}" for p in draft["broll_prompts"]]
+
+        beats, beat_warnings = normalize_beats(
+            draft.get("beats"), n_segments=len(intents) or 8, prompts=draft.get("broll_prompts"))
+        draft["beats"] = beats
+        warnings = beat_warnings + hook_warnings(draft.get("script", ""))
+        if warnings:
+            for w in warnings:
+                log(f"Style check: {w}")
+        draft["style_warnings"] = warnings
 
         draft["news"] = news
         draft["research"] = research
