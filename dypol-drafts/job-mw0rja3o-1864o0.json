@@ -1,0 +1,17 @@
+{
+  "job_id": "job-mw0rja3o-1864o0",
+  "producing_run_id": "41650724820",
+  "artifact_name": "draft-job-mw0rja3o-1864o0",
+  "draft_file": "1793715019.json",
+  "language": "en",
+  "title": "How AI Quietly Sorts Every Face in Your Camera Roll",
+  "topic": "How AI sorts your photos by face",
+  "review_required": true,
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793715019_en/broll_manifest.json",
+  "contains_synthetic_media": true,
+  "image_providers": [
+    "cloudflare_workers_ai",
+    "gradient",
+    "pixabay"
+  ]
+}
