@@ -52,7 +52,7 @@ def _wav_seconds(path):
 
 def test_kokoro_just_short_is_padded_not_rerendered(fake_kokoro, tmp_path):
     fake_kokoro.seconds = 44.9
-    script = " ".join(["word"] * 110)
+    script = " ".join(["word"] * 118)  # 158 WPM: inside the pace band, so only the length rule acts
     out = tts._generate_kokoro(script, tmp_path, "en")
     assert len(fake_kokoro.calls) == 1
     assert _wav_seconds(out) >= 45.0
@@ -60,7 +60,7 @@ def test_kokoro_just_short_is_padded_not_rerendered(fake_kokoro, tmp_path):
 
 def test_kokoro_far_short_still_rerenders(fake_kokoro, tmp_path):
     fake_kokoro.seconds = 43.0
-    script = " ".join(["word"] * 100)
+    script = " ".join(["word"] * 118)  # 165 WPM: slowing to fill 45 s keeps the pace >= 150
     tts._generate_kokoro(script, tmp_path, "en")
     assert len(fake_kokoro.calls) == 2
     assert fake_kokoro.calls[1] < fake_kokoro.calls[0]

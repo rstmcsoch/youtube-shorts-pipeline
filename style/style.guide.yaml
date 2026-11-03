@@ -5,14 +5,15 @@ version: 1
 engine: shorts
 
 pace:
-  target_wpm: 158              # am_michael at speed 1.08 measures ~156 WPM (voice test, 3 Nov 2026)
+  target_wpm: 158              # Kokoro speed is re-tuned once per run (0.9-1.4) to land in min-max;
+                               # 1.08 is only the start (dense draft job-mw0qn7ms came out at 116 WPM)
   min_wpm: 150
   max_wpm: 165
 
 voice:                         # brand narration voice (shared with Engine A for consistency)
   provider: kokoro             # Kokoro-82M, local, Apache-2.0 model
   kokoro_voice: am_michael     # natural American male; best intelligibility at 2x-2.5x playback
-  kokoro_speed: 1.08           # ~156 WPM, pauses at every comma and full stop
+  kokoro_speed: 1.08           # start speed; ~156 WPM on plain text, slower on dense technical text
   lang: en-us
   lead_silence_max_s: 0.12     # trim TTS lead-in so the first word lands well inside 0.8 s
   edge_fallback_en: en-US-GuyNeural  # emergency fallback only (unofficial endpoint, see notes)

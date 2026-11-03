@@ -64,9 +64,48 @@ def speed_for_target(seconds: float, speed: float, lo: float = VO_MIN_SECONDS, h
         return None
     target = lo + 2.0 if seconds < lo else hi - 2.0
     new_speed = round(speed * seconds / target, 3)
-    if 0.95 <= new_speed <= 1.2:
+    if 0.95 <= new_speed <= KOKORO_MAX_SPEED:
         return new_speed
     return None
+
+
+# Narration pace (brand target 150-165 WPM, aim 158). Kokoro's real pace depends on
+# the text: am_michael is ~156 WPM at 1.08 on plain sentences but only ~116 WPM on a
+# dense technical Short (draft job-mw0qn7ms, 3 Nov 2026), so speed is tuned per run.
+WPM_MIN, WPM_MAX, WPM_TARGET = 150.0, 165.0, 158.0
+KOKORO_MAX_SPEED = 1.4   # am_michael stays clear well past 1.25 (Engine A ships ~1.26)
+KOKORO_MIN_SPEED = 0.9
+
+
+def pace_band() -> tuple:
+    """(min, max, target) WPM from the style guide's `pace:` block, else the brand defaults."""
+    try:
+        from .style import load_style
+        v = dict(load_style().get("pace") or {})
+        lo = float(v.get("min_wpm", WPM_MIN)); hi = float(v.get("max_wpm", WPM_MAX))
+        tg = float(v.get("target_wpm", WPM_TARGET))
+    except Exception:  # noqa: BLE001 - a broken style file never blocks the voiceover
+        return WPM_MIN, WPM_MAX, WPM_TARGET
+    if not (0 < lo <= tg <= hi):
+        return WPM_MIN, WPM_MAX, WPM_TARGET
+    return lo, hi, tg
+
+
+def pace_speed(words: int, seconds: float, speed: float, lo: float = WPM_MIN, hi: float = WPM_MAX,
+               target: float = WPM_TARGET):
+    """Kokoro speed that brings words/minute into [lo, hi] (aiming at `target`), or None.
+
+    None when already in band, when the inputs are empty, or when the clamped speed
+    would not change anything."""
+    if words <= 0 or seconds <= 0:
+        return None
+    wpm = words / seconds * 60.0
+    if lo <= wpm <= hi:
+        return None
+    new_speed = round(min(KOKORO_MAX_SPEED, max(KOKORO_MIN_SPEED, speed * target / wpm)), 3)
+    if abs(new_speed - speed) < 0.01:
+        return None
+    return new_speed
 
 
 VO_MAX_SILENCE_PAD = 1.5  # seconds of trailing silence instead of a full re-render
@@ -204,8 +243,17 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
     samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=cfg["speed"], lang=kokoro_lang)
     # Keep the voiceover inside the 45-75 s window when a small speed change can
     # do it (one re-render at most, speed stays within 0.95-1.2).
+    n_words = max(1, len(str(script).split()))
     if samples is not None and len(samples):
         seconds = len(samples) / float(sample_rate)
+        lo_wpm, hi_wpm, tg_wpm = pace_band()
+        paced = pace_speed(n_words, seconds, cfg["speed"], lo_wpm, hi_wpm, tg_wpm)
+        if paced is not None:
+            log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM outside {lo_wpm:.0f}-{hi_wpm:.0f}; "
+                f"re-rendering at speed {paced}")
+            samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=paced, lang=kokoro_lang)
+            cfg["speed"] = paced
+            seconds = len(samples) / float(sample_rate)
         pad = short_padding_seconds(seconds)
         if pad:
             import numpy as np
@@ -215,6 +263,14 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
                                                                      dtype=np.asarray(samples).dtype)])
             seconds = len(samples) / float(sample_rate)
         new_speed = speed_for_target(seconds, cfg["speed"])
+        if new_speed is not None and new_speed < cfg["speed"]:
+            # Slowing down to fill the window must not drop the pace under the band;
+            # a short script is the script's problem, not the voice's.
+            est_wpm = n_words / seconds * 60.0 * new_speed / cfg["speed"]
+            if est_wpm < pace_band()[0]:
+                log(f"Kokoro voiceover {seconds:.1f}s is short, but slowing to {new_speed} would drop the "
+                    f"pace to {est_wpm:.0f} WPM; keeping speed {cfg['speed']}")
+                new_speed = None
         if new_speed is not None:
             log(f"Kokoro voiceover {seconds:.1f}s outside {VO_MIN_SECONDS}-{VO_MAX_SECONDS}s; re-rendering at speed {new_speed}")
             samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=new_speed, lang=kokoro_lang)
@@ -232,7 +288,8 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
     out_path = out_dir / f"voiceover_{lang}.wav"
     _write_wav(samples, sample_rate, out_path)
     _write_voice_meta(out_dir, "kokoro", cfg["voice"], cfg["speed"], cfg["model_file"])
-    log(f"Kokoro voiceover saved: {out_path.name} ({seconds:.1f}s, {wps:.2f} words/s)")
+    log(f"Kokoro voiceover saved: {out_path.name} ({seconds:.1f}s, {wps:.2f} words/s, {wps * 60:.0f} WPM, "
+        f"speed {cfg['speed']})")
     return out_path
 
 
