@@ -42,8 +42,9 @@ KOKORO_SHA256 = {
     "kokoro-v1.0.int8.onnx": "6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb",
     "voices-v1.0.bin": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
 }
-# One consistent brand voice. af_heart is the highest-graded Kokoro voice.
-KOKORO_DEFAULT_VOICE = "af_heart"
+# One consistent brand voice. The style guide's voice block wins (am_michael since
+# 3 Nov 2026: best ASR intelligibility at 2x-2.5x playback among Kokoro male voices).
+KOKORO_DEFAULT_VOICE = "am_michael"
 KOKORO_DEFAULT_SPEED = 1.08
 # Kokoro is only used for languages whose voice matches the brand voice.
 KOKORO_LANGS = {"en": "en-us"}
@@ -82,16 +83,55 @@ def short_padding_seconds(seconds: float, lo: float = VO_MIN_SECONDS, max_pad: f
     return round(lo - seconds + 0.25, 3)
 
 
+def lead_silence_max() -> float:
+    try:
+        return max(0.0, float(_style_voice().get("lead_silence_max_s", 0.12)))
+    except (TypeError, ValueError):
+        return 0.12
+
+
+def trim_lead_silence(samples, sample_rate: int, keep_s: float = 0.12, threshold: float = 0.01):
+    """Drop leading near-silence so at most `keep_s` remains before the first word
+    (the hook's first word must land by 0.8 s). Returns the samples unchanged when
+    the audio never rises above the threshold."""
+    import numpy as np
+    arr = np.asarray(samples)
+    if not len(arr):
+        return samples
+    loud = np.flatnonzero(np.abs(arr.astype("float32")) > threshold)
+    if not len(loud):
+        return samples
+    start = max(0, int(loud[0]) - int(round(keep_s * sample_rate)))
+    return arr[start:]
+
+
 def kokoro_model_dir() -> Path:
     default = Path.home() / ".cache" / "kokoro-onnx"
     return Path(os.environ.get("KOKORO_MODEL_DIR", str(default))).expanduser()
 
 
-def kokoro_settings() -> dict:
-    """Resolve the Kokoro voice/speed from env, clamped to a sane range."""
-    voice = (os.environ.get("KOKORO_VOICE", "") or KOKORO_DEFAULT_VOICE).strip()
+def _style_voice() -> dict:
     try:
-        speed = float(os.environ.get("KOKORO_SPEED", "") or KOKORO_DEFAULT_SPEED)
+        from .style import voice_settings
+        return voice_settings()
+    except Exception:  # noqa: BLE001 - a broken style file never blocks the voiceover
+        return {}
+
+
+def kokoro_settings() -> dict:
+    """Resolve the Kokoro voice/speed, clamped to a sane range.
+
+    Order: $DYPOL_VOICE / $DYPOL_VOICE_SPEED, then the style guide's `voice:` block (the
+    brand voice, am_michael at 1.08 since 3 Nov 2026), then the legacy $KOKORO_VOICE /
+    $KOKORO_SPEED (the workflow always sets these, defaulting to af_heart), then the
+    module defaults."""
+    style = _style_voice()
+    voice = (os.environ.get("DYPOL_VOICE", "") or str(style.get("kokoro_voice") or "")
+             or os.environ.get("KOKORO_VOICE", "") or KOKORO_DEFAULT_VOICE).strip()
+    raw_speed = (os.environ.get("DYPOL_VOICE_SPEED", "") or str(style.get("kokoro_speed") or "")
+                 or os.environ.get("KOKORO_SPEED", "") or KOKORO_DEFAULT_SPEED)
+    try:
+        speed = float(raw_speed)
     except ValueError:
         speed = KOKORO_DEFAULT_SPEED
     speed = min(1.3, max(0.8, speed))
@@ -156,6 +196,8 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
     from kokoro_onnx import Kokoro
 
     cfg = kokoro_settings()
+    if kokoro_lang == "en-us" and cfg["voice"][:1] == "b":  # bf_/bm_ voices are British English
+        kokoro_lang = "en-gb"
     model_path, voices_path = ensure_kokoro_files(cfg["model_file"])
     log(f"Generating {lang} voiceover via Kokoro-82M (voice: {cfg['voice']}, speed: {cfg['speed']})...")
     engine = Kokoro(str(model_path), str(voices_path))
@@ -179,6 +221,7 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
             cfg["speed"] = new_speed
     if samples is None or len(samples) < int(sample_rate) * 0.5:
         raise RuntimeError("Kokoro produced no usable audio")
+    samples = trim_lead_silence(samples, sample_rate, lead_silence_max())
     # Sanity check: spoken duration must roughly match the text length
     # (~1.2-4.5 words per second). Catches silent / truncated renders.
     words = max(1, len(str(script).split()))

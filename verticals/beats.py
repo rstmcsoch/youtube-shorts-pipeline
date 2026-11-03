@@ -53,7 +53,8 @@ CTA_RE = re.compile(r"\b(subscribe|follow (us|me|for more)|like and|hit the (lik
                     r"turn on notifications|link in (the )?bio)\b", re.I)
 # setup phrases that delay the hook (first real draft opened "Let me explain how ... in sixty seconds")
 INTRO_RE = re.compile(r"\b(let me (explain|show|tell|break)|let's (talk|dive|explore|break)|in (the next )?"
-                      r"(\d+|thirty|forty|fifty|sixty|ninety) seconds|in this (video|short)|stick around)\b", re.I)
+                      r"(30|45|60|90|thirty|forty|forty-five|fifty|sixty|ninety) seconds|in (one|a single|1) minute|"
+                      r"in this (video|short)|stick around)\b", re.I)
 NUMBER_RE = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|billion|"
                        r"percent|half|double|twice|triple)\b", re.I)
 
@@ -441,6 +442,33 @@ def variety_ok(beats: list[dict]) -> bool:
     return not any(len(set(kinds[i - limit:i + 1])) == 1 for i in range(limit, len(kinds)))
 
 
+# "Ten picometers—that is how AI reads your X-rays" (draft 5): a bare noun phrase, a dash,
+# then a clause. A short lead-in followed by a dash reads oddly when spoken aloud.
+HOOK_FRAGMENT_RE = re.compile(r"^\W*(\S+\s+){0,3}\S*?\s*(—|–|--|\s-\s)")
+_APOS = str.maketrans({"\u2019": "'", "\u2018": "'"})
+
+
+def sentences(script: str) -> list[str]:
+    text = " ".join(str(script or "").split())
+    return [x for x in re.split(r"(?<=[.!?])\s+", text) if x]
+
+
+def first_sentence(script: str) -> str:
+    parts = sentences(script)
+    return parts[0] if parts else ""
+
+
+def banned_phrases_in(script: str, phrases) -> list[str]:
+    """Banned setup/filler phrases that occur anywhere in the script (case/apostrophe-insensitive)."""
+    text = " ".join(str(script or "").translate(_APOS).casefold().split())
+    out = []
+    for p in phrases or []:
+        p2 = " ".join(str(p).translate(_APOS).casefold().split())
+        if p2 and re.search(r"(?<![a-z])" + re.escape(p2) + r"(?![a-z])", text):
+            out.append(str(p))
+    return out
+
+
 def hook_warnings(script: str) -> list[str]:
     """Script-level hook/ending checks (can't be auto-fixed; reported for review)."""
     rules = hook_rules()
@@ -455,6 +483,19 @@ def hook_warnings(script: str) -> list[str]:
     if re.match(r"(hey|hi|hello|welcome|what's up|in this video|today we)", " ".join(words[:4]), re.I) \
             or INTRO_RE.search(" ".join(words[:14])):
         out.append("hook: script opens with an intro/greeting")
+    first = first_sentence(script)
+    max_words = int(rules.get("max_words", 12) or 12)
+    n_first = len(first.split())
+    if n_first > max_words:
+        out.append(f"hook: sentence 1 has {n_first} words (max {max_words}); say one plain claim")
+    if HOOK_FRAGMENT_RE.search(first):
+        out.append("hook: opens with a fragment and a dash; say it as one plain conversational sentence")
+    opening = " ".join(sentences(script)[:2])
+    found = banned_phrases_in(opening, rules.get("banned_phrases") or [])
+    found += [p for p in banned_phrases_in(script, rules.get("filler_phrases") or []) if p not in found]
+    if found:
+        out.append("hook: setup/filler phrase " + ", ".join(f'"{p}"' for p in found[:4])
+                   + "; cut it and state the claim directly")
     if rules.get("no_end_cta", True):
         tail = " ".join(words[-25:])
         if CTA_RE.search(tail):

@@ -10,7 +10,7 @@ script:
       template: "This just happened in the world of comedy."
       when: "recent event"
     - id: explainer
-      template: "{concrete_number_or_fact}. Here is what that means for {topic}."
+      template: "{one plain sentence, max 12 words, stating the most surprising real number or claim about {topic}}."
       when: "complex topic"
   cta_variants:
     - "Follow for more."

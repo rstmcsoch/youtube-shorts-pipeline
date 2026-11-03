@@ -101,7 +101,20 @@ def _parallel_produce_enabled() -> bool:
     return os.environ.get("DYPOL_PARALLEL_PRODUCE", "1").strip() not in {"0", "false", "no"}
 
 
+def _stage_timer():
+    """Logs `DYPOL_TIMING stage=<name> seconds=<s>` lines so render time is measurable per stage."""
+    import time
+    marks = {"t": time.monotonic()}
+
+    def lap(stage):
+        now = time.monotonic()
+        print(f"DYPOL_TIMING stage={stage} seconds={now - marks['t']:.1f}", flush=True)
+        marks["t"] = now
+    return lap
+
+
 def cmd_produce(args):
+    lap = _stage_timer()
     from .broll import generate_broll
     from .tts import generate_voiceover
     from .captions import generate_captions
@@ -163,11 +176,13 @@ def cmd_produce(args):
                 work_dir,
                 visual_intents=draft.get("visual_intents", []),
                 video_title=draft.get("youtube_title") or draft.get("news", ""),
+                topic=draft.get("news", ""),
             )
         except BaseException:
             if vo_pool is not None:
                 vo_pool.shutdown(wait=False, cancel_futures=True)
             raise
+        lap("broll")
         manifest_path = work_dir / "broll_manifest.json"
         _apply_visual_manifest(draft, draft_path, manifest_path)
         state.complete_stage("broll", {
@@ -192,6 +207,7 @@ def cmd_produce(args):
                 provider=tts_provider,
                 voice_config=_voice_config(),
             )
+        lap("voiceover_wait")
         state.complete_stage("voiceover", {"path": str(vo_path)})
         # Length window + enough distinct visuals for the actual narration length.
         from .assemble import get_audio_duration, SHOT_TARGET_SECONDS
@@ -261,6 +277,7 @@ def cmd_produce(args):
         }
 
     # Assemble
+    lap("topup_captions_music")
     if force or not state.is_done("assemble"):
         video_path = assemble_video(
             frames=frames,
@@ -275,6 +292,7 @@ def cmd_produce(args):
             beats=draft.get("beats") if lang == "en" else None,
             words=captions_result.get("words"),
         )
+        lap("assemble_qc")
         state.complete_stage("assemble", {"video_path": str(video_path)})
         # Post-render QC (warnings only): qc.json + contact sheet ride in the draft artifact.
         from .assemble import qc_paths
@@ -292,6 +310,7 @@ def cmd_produce(args):
         manifest_path = work_dir / "broll_manifest.json"
         if manifest_path.exists() and judge_contact_sheet(work_dir, draft.get("youtube_title", "")) is not None:
             _apply_visual_manifest(draft, draft_path, manifest_path)
+        lap("contact_sheet_judge")
     else:
         log("Skipping assembly (already done)")
         video_path = Path(state.get_artifact("assemble", "video_path"))

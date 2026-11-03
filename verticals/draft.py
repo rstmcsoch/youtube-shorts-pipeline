@@ -156,12 +156,14 @@ def _enforce_hook(draft: dict, prompt: str, provider: str | None, research: str 
     log(f"Draft hook problems ({'; '.join(problems)}); requesting one hook rewrite.")
     fix = (
         prompt + "\n\nHOOK CORRECTION: your previous script started: \"" + " ".join(script.split()[:30]) + "...\". "
-        "Problems: " + "; ".join(problems) + ". Rewrite ONLY the opening so sentence 1 (at most 12 words) is the "
-        "most surprising concrete fact, and a real, checkable number (a figure, percentage, year or count from the "
+        "Problems: " + "; ".join(problems) + ". Rewrite the opening so sentence 1 is ONE complete, plain, "
+        "conversational English sentence of at most 12 words (subject + verb, no dash, no fragment) stating the "
+        "most surprising concrete claim, and a real, checkable number (a figure, percentage, year or count from the "
         "research, copied exactly; never a number that is not in the research) is spoken within the first 20 words. "
-        "No setup such as 'let me explain', 'in sixty seconds', "
-        "'most people get this wrong'. Keep the rest of the script, the beats and the length, and return the "
-        "complete JSON object again."
+        "Example shape: 'An AI can spot a broken wrist faster than most doctors.' No setup such as 'let me explain', "
+        "'in sixty seconds', 'that is how', 'most people get this wrong', and delete filler lines such as "
+        "'Here is the thing.' anywhere in the script. Keep the rest of the script, the beats and the length, and "
+        "return the complete JSON object again."
     )
     try:
         retry = _generate_json_response(fix, provider)
@@ -431,7 +433,7 @@ RULES:
 - Anti-hallucination: only use factual claims supported by the research above; do not invent facts, names, numbers, quotes, or events.
 - STRICT DYPOL PRIVACY/STYLE RULE: Do not include any personal names of real people anywhere in any output field. This applies to the narration script, YouTube title, YouTube description, tags, Instagram caption, TikTok caption, thumbnail prompt, and every b-roll prompt. Do not name public figures, executives, creators, politicians, researchers, or any other individual, even when their names appear in the topic or research. Refer to people only by role or generic description (for example, "the company's CEO", "a technology researcher", or "the platform's founder"). Company, product, organization, and place names are allowed when relevant; individual people's names are not.
 - Before returning JSON, review every field and remove personal names, including names embedded in quoted text, examples, hashtags, or thumbnail/on-screen-text instructions. If the topic cannot be covered accurately without a person's name, rewrite it as a general explanation rather than including the name.
-- HOOK (first ~1.5 seconds): the very first sentence is the hook. It must be at most 10 words, start with the most surprising concrete fact, number, or tension in the story, and work even with the sound off as an on-screen caption. No greeting, no channel name, no "in this video", no "let me explain", no setup before the hook.
+- HOOK (the first word is spoken within 0.8 s): sentence 1 IS the hook. One complete, plain, conversational English sentence of at most 12 words, the way you would say it to a friend: a concrete, surprising claim or a real number from the research, with a subject and a verb. Good: "An AI can spot a broken wrist faster than most doctors." / "Your earbuds flip sound waves upside down 50,000 times a second." Bad: "Ten picometers—that is how AI reads your X-rays." (a fragment plus a dash), "Let me explain how X works in sixty seconds." (setup). Never open with a bare number phrase followed by a dash, and never use "let me explain", "in sixty seconds", "here is the thing", "that is how", "most people get this wrong", a greeting or a channel name. Do not use filler lines such as "Here is the thing." anywhere; go straight to the next fact.
 {beat_rules['hook']}
 - The first broll_prompt / visual_intent must be the single most striking, high-motion visual for the story (it is the opening shot): concrete and immediately readable, never an abstract background.
 - LENGTH: the script must be {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words so the voiceover lands between 45 and 75 seconds.

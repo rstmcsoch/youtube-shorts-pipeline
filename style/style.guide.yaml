@@ -5,9 +5,20 @@ version: 1
 engine: shorts
 
 pace:
-  target_wpm: 165
-  min_wpm: 155
-  max_wpm: 175
+  target_wpm: 158              # am_michael at speed 1.08 measures ~156 WPM (voice test, 3 Nov 2026)
+  min_wpm: 150
+  max_wpm: 165
+
+voice:                         # brand narration voice (shared with Engine A for consistency)
+  provider: kokoro             # Kokoro-82M, local, Apache-2.0 model
+  kokoro_voice: am_michael     # natural American male; best intelligibility at 2x-2.5x playback
+  kokoro_speed: 1.08           # ~156 WPM, pauses at every comma and full stop
+  lang: en-us
+  lead_silence_max_s: 0.12     # trim TTS lead-in so the first word lands well inside 0.8 s
+  edge_fallback_en: en-US-GuyNeural  # emergency fallback only (unofficial endpoint, see notes)
+  # Overrides: $DYPOL_VOICE / $DYPOL_VOICE_SPEED beat this block; the old $KOKORO_VOICE /
+  # $KOKORO_SPEED (the workflow sets af_heart by default) apply only when this block has no voice.
+  # Measurements: notes/voice-choice-2026-11-03.md in the DYPOL project.
 
 screen:
   width: 1080
@@ -27,7 +38,24 @@ structure:                     # hook -> how it works (2-3 beats) -> the catch -
   final_block_motion: true     # the last beat is a motion takeaway card, never a still
 
 hook:
-  first_word_by_s: 0.5         # no intro, no silence before the first word
+  first_word_by_s: 0.8         # first spoken word by 0.8 s (checked on the Whisper timings after render)
+  max_words: 12                # sentence 1 is one plain conversational sentence of at most 12 words
+  banned_phrases:              # setup that makes the opening (first 2 sentences) read oddly (piece 5)
+    - "let me explain"
+    - "let me break"
+    - "in sixty seconds"
+    - "in 60 seconds"
+    - "that is how"
+    - "that's how"
+    - "most people get this wrong"
+    - "you won't believe"
+    - "buckle up"
+  filler_phrases:              # empty filler lines, banned anywhere in the script
+    - "here is the thing"
+    - "here's the thing"
+    - "the thing is"
+    - "let me explain"
+    - "in sixty seconds"
   stakes_by_s: 3.0             # why it matters, said by 3 s
   number_by_s: 8.0             # one concrete number by 8 s
   no_intro: true

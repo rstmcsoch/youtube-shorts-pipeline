@@ -6,11 +6,11 @@ from verticals.style import block_kinds, hook_rules, max_same_run, load_style
 
 def test_style_guide_values():
     style = load_style()
-    assert style["pace"]["target_wpm"] == 165
+    assert style["pace"]["target_wpm"] == 158
     assert style["screen"]["max_static_s"] == 3.5
     assert style["screen"]["change_every_s"] == [2.0, 4.0]
     assert max_same_run() == 2
-    assert hook_rules()["first_word_by_s"] == 0.5 and hook_rules()["number_by_s"] == 8.0
+    assert hook_rules()["first_word_by_s"] == 0.8 and hook_rules()["number_by_s"] == 8.0
     assert set(block_kinds()) == {"kinetic_text", "count_up", "code_panel", "diagram", "stock_or_ai_still"}
     assert style["look"]["palette"]["background"] == "#0F141C"
 

@@ -97,7 +97,7 @@ class TestHookAndLength:
         mock_llm.return_value = json.dumps({"script": "s", "broll_prompts": ["p"]})
         generate_draft("Test")
         prompt = mock_llm.call_args[0][0]
-        assert "HOOK (first ~1.5 seconds)" in prompt
+        assert "HOOK (the first word is spoken within 0.8 s)" in prompt and "at most 12 words" in prompt
         assert "45 and 75 seconds" in prompt
 
     @patch("verticals.draft.research_topic")

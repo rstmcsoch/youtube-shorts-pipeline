@@ -128,3 +128,28 @@ def run_qc(video: Path, out_json: Path, contact_png: Path, merged_video: Path | 
     for w in report["warnings"]:
         log(f"QC warning: {w}")
     return report
+
+
+def hook_timing(words: list | None, limit_s: float = 0.8) -> dict:
+    """When the first narrated word starts (Whisper timings) against the hook rule."""
+    try:
+        first = float((words or [])[0]["start"])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return {"first_word_s": None, "ok": None, "limit_s": limit_s}
+    return {"first_word_s": round(first, 3), "ok": first <= limit_s, "limit_s": limit_s}
+
+
+def add_hook_timing(qc_json: Path, words: list | None, limit_s: float = 0.8) -> dict:
+    """Write the hook timing into an existing qc.json (warning when the first word is late)."""
+    timing = hook_timing(words, limit_s)
+    try:
+        report = json.loads(Path(qc_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return timing
+    report["hook"] = timing
+    if timing["ok"] is False:
+        report.setdefault("warnings", []).append(
+            f"hook: first word at {timing['first_word_s']:.2f} s (limit {limit_s:g} s)")
+        report["status"] = "warn"
+    Path(qc_json).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return timing

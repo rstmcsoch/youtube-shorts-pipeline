@@ -13,7 +13,7 @@ script:
       template: "This just happened and you need to know about it."
       when: "recent event"
     - id: explainer
-      template: "{concrete_number_or_fact}. Here's how {topic} really works."
+      template: "{one plain sentence, max 12 words, stating the most surprising real number or claim about {topic}}."
       when: "complex topic; open on the number, never on setup"
     - id: question
       template: "Why is everyone talking about {topic}? Here's the real story."

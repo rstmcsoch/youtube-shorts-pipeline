@@ -37,11 +37,12 @@ class TestKokoro:
 
     def test_settings_defaults_and_clamp(self, monkeypatch):
         monkeypatch.delenv("KOKORO_VOICE", raising=False)
-        monkeypatch.setenv("KOKORO_SPEED", "9")
+        monkeypatch.delenv("DYPOL_VOICE", raising=False)
+        monkeypatch.setenv("DYPOL_VOICE_SPEED", "9")
         cfg = tts.kokoro_settings()
         assert cfg["voice"] == tts.KOKORO_DEFAULT_VOICE
         assert cfg["speed"] == 1.3
-        monkeypatch.setenv("KOKORO_SPEED", "bad")
+        monkeypatch.setenv("DYPOL_VOICE_SPEED", "bad")
         assert tts.kokoro_settings()["speed"] == tts.KOKORO_DEFAULT_SPEED
 
     def test_write_wav_is_valid_pcm(self, tmp_path):

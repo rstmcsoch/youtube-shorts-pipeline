@@ -11,7 +11,8 @@ from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PR
 from .config import MEDIA_DIR, run_cmd
 from .log import log
 from .backdrop import Backdrop
-from .motion import MOTION_KINDS, code_typing_window, motion_cards, render_block
+from .motion import MOTION_KINDS, code_typing_window, key_words, motion_cards, render_block
+from .motion import _window as narration_window
 from .style import STYLE_DIR
 
 EFFECTS = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
@@ -492,15 +493,44 @@ def assemble_video(
             parts.append(part)
         _concat_copy(parts, anim)
 
+    def _narration_card(i, shot, anim):
+        """A kinetic card from the words spoken in this shot over a living background: what an
+        empty slot (or a gradient backup) becomes, so no shot is ever a bare gradient."""
+        cuts = shot.get("cuts") or [shot["duration"]]
+        spoken = key_words(narration_window(words, starts[i], starts[i] + shot["duration"])) or ["key", "point"]
+        kind, data = "kinetic_text", {"words": spoken[:4], "accent": max(spoken[:4], key=len)}
+
+        def _text_heavy(k):
+            if not 0 <= k < len(plan) or plan[k]["source"] is None:
+                return False
+            return sources[plan[k]["source"]].get("block") in ("kinetic_text", "code_panel")
+        if (_text_heavy(i - 1) or _text_heavy(i + 1)) and len(spoken) >= 2:
+            # owner rule: never 3 text-heavy blocks in a row, so a flowing diagram instead
+            kind, data = "diagram", {"title": "", "nodes": [w[:1].upper() + w[1:] for w in spoken[:4]]}
+        bd = Backdrop(None, seed=i, duration=shot["duration"])
+        parts, t_bg = [], 0.0
+        for j, spec in enumerate(motion_cards(kind, data, cuts, starts[i], words)):
+            part = out_dir / f"anim_{i}_{j}.mp4"
+            render_block(spec["kind"], spec["data"], part, spec["duration"], backdrop=bd, bg_t0=t_bg)
+            parts.append(part)
+            t_bg += spec["duration"]
+        _concat_copy(parts, anim)
+        log(f"Shot {i}: no footage left; rendered a narration card instead of a gradient")
+        return anim
+
     def _render_shot(i, shot):
         anim = out_dir / f"anim_{i}.mp4"
         cuts = shot.get("cuts") or [shot["duration"]]
-        if shot["source"] is None:
-            from .broll import _fallback_frame
-            fb = _fallback_frame(200 + i, out_dir)
-            _still_shot(i, lambda j: fb, shot, anim)
-            return anim
-        src = sources[shot["source"]]
+        src = sources[shot["source"]] if shot["source"] is not None else None
+        if src is None or (src["kind"] == "still" and src.get("provider") == "gradient"):
+            try:
+                return _narration_card(i, shot, anim)
+            except Exception as exc:  # noqa: BLE001 - last resort only
+                log(f"Narration card failed ({exc}); using a gradient frame")
+                from .broll import _fallback_frame
+                fb = _fallback_frame(200 + i, out_dir)
+                _still_shot(i, lambda j: fb, shot, anim)
+                return anim
         whole = out_dir / f"anim_{i}_whole.mp4" if len(cuts) > 1 else anim
         if src["kind"] == "motion":
             try:
@@ -599,6 +629,11 @@ def assemble_video(
             from .qc import run_qc
             qc_json, contact = qc_paths(job_id, lang)
             run_qc(out_path, qc_json, contact, merged_video=merged_video)
+            from .qc import add_hook_timing
+            from .style import hook_rules
+            timing = add_hook_timing(qc_json, words, float(hook_rules().get("first_word_by_s", 0.8)))
+            if timing.get("first_word_s") is not None:
+                log(f"Hook: first word at {timing['first_word_s']:.2f} s ({'ok' if timing['ok'] else 'LATE'})")
         except Exception as exc:  # QC only warns
             log(f"QC skipped ({exc})")
     return out_path

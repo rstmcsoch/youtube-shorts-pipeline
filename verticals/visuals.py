@@ -422,6 +422,15 @@ def nvidia_flux_available():
             and bool(os.environ.get("NVIDIA_API_KEY", "").strip()))
 
 
+def nvidia_flux_timeout():
+    """Read timeout for one NVIDIA FLUX request ($DYPOL_NVIDIA_FLUX_TIMEOUT, default 40 s; a
+    healthy schnell request answers in well under 10 s)."""
+    try:
+        return max(5.0, float(os.environ.get("DYPOL_NVIDIA_FLUX_TIMEOUT", "40")))
+    except ValueError:
+        return 40.0
+
+
 def reset_nvidia_state():
     _nvidia_state.update({"last": 0.0, "square_only": False, "disabled": ""})
 
@@ -468,10 +477,14 @@ def _nvidia_flux_generate(prompt, output_path, seed=0):
                 "seed": int(seed or 0) % 2147483647, "steps": 4}
         _nvidia_throttle()
         try:
-            response = requests.post(NVIDIA_FLUX_URL, json=body, timeout=(8, 90), headers={
+            response = requests.post(NVIDIA_FLUX_URL, json=body, timeout=(8, nvidia_flux_timeout()), headers={
                 "Authorization": f"Bearer {key}", "Accept": "application/json"})
         except requests.RequestException as exc:
             print(f"NVIDIA FLUX request failed: {exc}", flush=True)
+            if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+                # Circuit breaker: draft 5 waited 7 x 95 s (11 min) on a hung endpoint.
+                # One timeout means it is down for this run; stock/gradient take over.
+                mark_provider_limit(NVIDIA_FLUX_PROVIDER, "timeout", "NVIDIA hosted FLUX.1-schnell not answering")
             return None
         status = getattr(response, "status_code", 0)
         if status == 200:
@@ -531,7 +544,12 @@ def _prefilter_ok(candidate, intent, kind):
     """Mechanical gates that need no download (relevance, tags, resolution, entity match)."""
     if not candidate.get("download_url"):
         return False
-    if relevance_score(candidate, intent) < 0.20:
+    if intent.get("topic_fallback"):
+        # topic queries carry no entities, so the entity-weighted score is low by design;
+        # the strong-tag overlap in stock_candidate_ok is the relevance gate instead
+        if not tag_overlap(candidate, intent):
+            return False
+    elif relevance_score(candidate, intent) < 0.20:
         return False
     if candidate.get("provider") == "pixabay" and not stock_candidate_ok(candidate, intent):
         return False
@@ -627,8 +645,51 @@ def _select_visual_judged(judge, intent, output_path, used_hashes, query, provid
 
 
 def select_visual(intent, output_path, used_hashes=None, ctx=None):
-    """Resolve one still using the intent-specific order; returns (manifest, review_required)."""
+    """Resolve one still: stock (Wikimedia PD/CC0 for news/product, then Pixabay) -> FLUX ->
+    gradient. Returns (manifest, review_required)."""
     used_hashes = used_hashes if used_hashes is not None else set()
+    found, review, reason = select_stock_visual(intent, output_path, used_hashes, ctx)
+    if found is not None:
+        return found, review
+    return ai_or_gradient(intent, output_path, used_hashes, review, reason)
+
+
+def ai_or_gradient(intent, output_path, used_hashes=None, judge_review=False, judge_reason=""):
+    """FLUX still (Cloudflare, then NVIDIA once Cloudflare is out), else the gradient marker.
+    Only called once stock had nothing relevant for the segment or its topic."""
+    used_hashes = used_hashes if used_hashes is not None else set()
+    output_path = Path(output_path)
+    kind = intent.get("type", "concept")
+
+    def _flag(meta):
+        if judge_review:
+            meta["judge"] = {"decision": "not_judged", "needs_review": True,
+                             "review_reason": f"{judge_reason}; used {meta.get('provider')} fallback"}
+        return meta
+    ai = _ai_generate(flux_prompt(intent), output_path,
+                      seed=int(hashlib.sha256(str(output_path).encode()).hexdigest()[:8], 16))
+    if ai:
+        digest = ai["sha256"]
+        if digest not in used_hashes:
+            used_hashes.add(digest)
+            return _flag(ai), judge_review
+        output_path.unlink(missing_ok=True)
+    output_path.unlink(missing_ok=True)
+    return _flag(gradient_meta()), bool(judge_review or (kind in {"news_event", "product"}
+                                                         and intent.get("real_image_essential")))
+
+
+def gradient_meta():
+    return {"provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
+            "license": "Original generated gradient", "license_url": "", "retrieved_at": _now(), "sha256": ""}
+
+
+def select_stock_visual(intent, output_path, used_hashes=None, ctx=None):
+    """Stock-only still (no FLUX, no gradient): Wikimedia PD/CC0 then Pixabay for news/product
+    segments, Pixabay for the rest, through the frame judge when it is active.
+    Returns (metadata | None, needs_review, review_reason)."""
+    used_hashes = used_hashes if used_hashes is not None else set()
+    output_path = Path(output_path)
     kind = intent.get("type", "concept")
     query = " ".join([*(intent.get("entities") or []), *(intent.get("keywords") or [])]).strip()
     query = query or str(intent.get("prompt", "technology concept"))
@@ -638,9 +699,7 @@ def select_visual(intent, output_path, used_hashes=None, ctx=None):
     if judge is not None:
         found, judge_review, judge_reason = _select_visual_judged(
             judge, intent, output_path, used_hashes, query, providers, ctx or {})
-        if found is not None:
-            return found, judge_review
-        providers = []  # every stock candidate was judged; fall through to FLUX / gradient
+        return found, judge_review, judge_reason  # every stock candidate was judged
     candidates = []
     for provider in providers:
         try:
@@ -663,29 +722,52 @@ def select_visual(intent, output_path, used_hashes=None, ctx=None):
                 used_hashes.add(digest)
                 metadata.pop("download_url", None)
                 metadata["relevance_score"] = relevance_score(candidate, intent)
-                return metadata, False
+                return metadata, False, ""
             except (requests.RequestException, OSError, ValueError):
                 output_path.unlink(missing_ok=True)
                 continue
+    return None, judge_review, judge_reason
 
-    def _flag(meta):
-        if judge_review:
-            meta["judge"] = {"decision": "not_judged", "needs_review": True,
-                             "review_reason": f"{judge_reason}; used {meta.get('provider')} fallback"}
-        return meta
-    ai = _ai_generate(flux_prompt(intent), output_path,
-                      seed=int(hashlib.sha256(str(output_path).encode()).hexdigest()[:8], 16))
-    if ai:
-        digest = ai["sha256"]
-        if digest not in used_hashes:
-            used_hashes.add(digest)
-            return _flag(ai), judge_review
-        output_path.unlink(missing_ok=True)
-    output_path.unlink(missing_ok=True)
-    return _flag({"provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
-                  "license": "Original generated gradient", "license_url": "", "retrieved_at": _now(),
-                  "sha256": ""}), bool(judge_review or (kind in {"news_event", "product"}
-                                                         and intent.get("real_image_essential")))
+
+# Topic-level stock fallback: when a segment's own keywords find nothing, the video's
+# topic ("medical x-ray", "noise cancelling earbuds") almost always has real footage.
+TOPIC_STOPWORDS = {
+    "how", "why", "what", "when", "where", "who", "does", "do", "is", "are", "the", "a", "an", "your", "you",
+    "our", "my", "its", "it", "of", "to", "in", "on", "for", "by", "with", "and", "or", "actually", "really",
+    "use", "uses", "using", "used", "read", "reads", "work", "works", "make", "makes", "can", "will", "now",
+    "ai", "artificial", "intelligence", "machine", "learning", "explained", "secret", "truth", "inside",
+    "sort", "sorts", "turn", "turns", "detect", "detects", "unlock", "unlocks", "catch", "catches", "spot",
+    "spots", "find", "finds", "see", "sees", "know", "knows", "predict", "predicts", "hear", "hears", "help",
+    "helps", "change", "changes", "changed", "keep", "keeps", "stop", "stops", "into", "this", "that", "these", "those", "new", "every", "all",
+}
+
+
+def topic_phrases(title):
+    """Pixabay-friendly topic queries from a video title, longest first:
+    'How AI reads medical X-rays' -> ['medical x-rays', 'x-rays', 'medical']."""
+    words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-']*", str(title or ""))
+             if w.casefold().strip("'") not in TOPIC_STOPWORDS and w.casefold() not in BRAND_TERMS]
+    words = [w.lower() for w in words if len(w) >= 3 or "-" in w]
+    out = []
+    if len(words) >= 2:
+        out.append(" ".join(words[:3]))
+    for w in sorted(words, key=lambda x: (-("-" in x), -len(x))):
+        if w not in out:
+            out.append(w)
+    return out[:3]
+
+
+def topic_intent(intent, title):
+    """A copy of `intent` whose keywords are the video's topic phrases. The topic itself is
+    the relevance anchor, so the tech-anchor tag rule is relaxed (niche 'topic'); the
+    off-topic-subject and rights rules still apply. None when the title gives nothing."""
+    phrases = topic_phrases(title)
+    if not phrases:
+        return None
+    out = dict(intent)
+    out.update(keywords=phrases, entities=[], niche="topic", topic_fallback=True,
+               segment=f"{intent.get('segment') or ''} {title}".strip())
+    return out
 
 
 # ─────────────────────────────────────────────────────

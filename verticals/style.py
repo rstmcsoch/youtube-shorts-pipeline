@@ -50,3 +50,8 @@ def font_path(role: str) -> Path:
 def screen() -> tuple[int, int, int]:
     s = load_style()["screen"]
     return int(s["width"]), int(s["height"]), int(s["fps"])
+
+
+def voice_settings() -> dict:
+    """The brand narration voice block (empty dict when the style file has none)."""
+    return dict(load_style().get("voice") or {})

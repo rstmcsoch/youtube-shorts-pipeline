@@ -156,13 +156,17 @@ def _judge_block(judge):
 
 
 def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = None,
-                   video_title: str = "") -> list[Path]:
+                   video_title: str = "", topic: str = "") -> list[Path]:
     """Resolve real visuals through rights-gated providers, then gradient fallback.
 
-    Per segment: an optional Pixabay video clip (motion tier, tried first in the
-    shot plan) plus one still (Wikimedia → Pixabay still → FLUX → gradient).
+    Stock first, per segment: (1) a Pixabay video clip for the segment, else for the video's
+    topic; (2) a stock still (Wikimedia PD/CC0 for news/product, then Pixabay), segment then
+    topic; (3) FLUX only when the segment has no clip and no relevant stock still; (4) a
+    gradient last (backup-only in the shot plan). Draft 5 ran FLUX before trying any clip
+    and the free quota ran out: 7 of 8 stills were gradients.
     """
-    from .visuals import select_visual, select_video_clip, flux_prompt
+    from .visuals import (ai_or_gradient, flux_prompt, gradient_meta, select_stock_visual, select_video_clip,
+                          topic_intent, topic_phrases)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +185,8 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
     if judge is not None:
         judge.begin_video("short")
     judge_ctx = {"video_title": video_title or ""}
+    topic_title = str(topic or video_title or "")  # the console topic is plainer than the title
+    topic = topic_phrases(topic_title) or None
     shot_review_reasons = []
     used_hashes = set()
     used_clip_ids = set()
@@ -196,6 +202,7 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
         intent.setdefault("prompt", str(prompt))
         metadata = None
         needs_review = False
+        reason = ""
         # Optional single-model fast path. Disabled by default; a zero-quota 429
         # disables further Gemini attempts for this job immediately.
         if gemini_first_try and gemini_key and not gemini_disabled:
@@ -219,8 +226,33 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
                 log(f"Optional Gemini image attempt skipped: {exc}")
                 if "429" in message and ("limit: 0" in message or "quota" in message):
                     gemini_disabled = True
-        if metadata is None:
-            metadata, needs_review = select_visual(intent, out_path, used_hashes, ctx=judge_ctx)
+        clip_meta = None
+        if clips_enabled:  # 1. topic Pixabay video: the segment's own keywords, then the video topic
+            clip_meta = select_video_clip(intent, out_dir / f"clip_{i}.mp4", used_clip_ids, ctx=judge_ctx)
+            if clip_meta is None and topic is not None:
+                clip_meta = select_video_clip(topic_intent(intent, topic_title), out_dir / f"clip_{i}.mp4",
+                                              used_clip_ids, ctx=judge_ctx)
+                if clip_meta:
+                    clip_meta["topic_fallback"] = True
+            if clip_meta:
+                log(f"Segment {i}: Pixabay clip {clip_meta['asset_id']} ({clip_meta['duration_seconds']}s)"
+                    + (" [topic]" if clip_meta.get("topic_fallback") else ""))
+        if metadata is None:  # 2. stock stills (Wikimedia PD/CC0 for news, Pixabay), segment then topic
+            metadata, needs_review, reason = select_stock_visual(intent, out_path, used_hashes, ctx=judge_ctx)
+            if metadata is None and topic is not None:
+                metadata, review2, reason2 = select_stock_visual(topic_intent(intent, topic_title), out_path,
+                                                                 used_hashes, ctx=judge_ctx)
+                if metadata is not None:
+                    metadata["topic_fallback"] = True
+                    needs_review, reason = review2, reason2
+            if metadata is None:
+                if clip_meta:
+                    # real footage covers this segment: no FLUX call, the still slot is a backup gradient
+                    metadata, needs_review = gradient_meta(), False
+                else:  # 3. FLUX only when stock had nothing relevant; 4. gradient last
+                    metadata, needs_review = ai_or_gradient(intent, out_path, used_hashes, needs_review, reason)
+            elif metadata.get("topic_fallback"):
+                log(f"Segment {i}: topic stock still {metadata.get('provider')} {metadata.get('asset_id')}")
             if (metadata.get("judge") or {}).get("needs_review"):
                 shot_review_reasons.append(f"Segment {i}: visual judge: {metadata['judge'].get('review_reason')}")
         review_required = review_required or needs_review
@@ -234,20 +266,10 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
             except Exception as exc:
                 log(f"Selected visual could not be normalized; using gradient: {exc}")
                 _fallback_frame(i, out_dir)
-                metadata = {
-                    "provider": "gradient", "source_url": "", "asset_id": "gradient-fallback",
-                    "license": "Original generated gradient", "license_url": "",
-                    "retrieved_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-                    "sha256": "",
-                }
+                metadata = gradient_meta()
                 source = "gradient"
                 if intent.get("type") in {"news_event", "product"} and intent.get("real_image_essential"):
                     review_required = True
-        clip_meta = None
-        if clips_enabled:
-            clip_meta = select_video_clip(intent, out_dir / f"clip_{i}.mp4", used_clip_ids, ctx=judge_ctx)
-            if clip_meta:
-                log(f"Segment {i}: Pixabay clip {clip_meta['asset_id']} ({clip_meta['duration_seconds']}s)")
         frames.append(out_path)
         manifest.append({
             "frame": out_path.name,
@@ -282,6 +304,7 @@ def generate_broll(prompts: list, out_dir: Path, visual_intents: list | None = N
     review_required = bool(review_required or reasons)
     manifest_path = out_dir / "broll_manifest.json"
     manifest_path.write_text(json.dumps({
+        "video_title": topic_title,
         "assets": manifest,
         "review_required": review_required,
         "review_reasons": reasons,
@@ -326,7 +349,7 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
     """Add FLUX frames when the manifest cannot fill `shots_needed` shots under the
     reuse caps (third-party once, AI/original twice). Never exceeds MAX_AI_FRAMES
     FLUX frames in total. Returns the number of frames added."""
-    from .visuals import _ai_generate, flux_prompt, AI_IMAGE_PROVIDERS
+    from .visuals import _ai_generate, flux_prompt, AI_IMAGE_PROVIDERS, select_stock_visual, topic_intent
 
     out_dir = Path(out_dir)
     manifest_path = out_dir / "broll_manifest.json"
@@ -341,10 +364,13 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
         if (row.get("clip") or {}).get("file") and (out_dir / row["clip"]["file"]).exists():
             capacity += 1
     ai_count = sum(1 for r in rows if r.get("provider") in AI_IMAGE_PROVIDERS)
+    topic_title = str(data.get("video_title") or "")
+    used_hashes = {r.get("sha256") for r in rows if r.get("sha256")}
+    stock_ok = True
     added = 0
     attempts = 0
     segments = [r for r in rows if r.get("intent")] or [{"intent": {"keywords": ["technology hardware"]}, "segment_index": 0}]
-    while capacity < shots_needed and ai_count < MAX_AI_FRAMES and attempts < MAX_AI_FRAMES:
+    while capacity < shots_needed and ai_count < MAX_AI_FRAMES and attempts < MAX_AI_FRAMES + 4:
         attempts += 1
         # Spread extra frames over the segments that have the fewest visuals.
         per_seg = {}
@@ -355,9 +381,22 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
         intent = dict(base.get("intent") or {})
         variant = 1 + ai_count + added
         out_path = out_dir / f"broll_extra_{len(rows)}.png"
-        meta = _ai_generate(flux_prompt(intent, variant=variant), out_path, seed=variant + len(rows))
+        meta = None
+        if stock_ok and topic_title:  # stock first: another topic still before any FLUX call
+            t_intent = topic_intent(intent or {"type": "concept"}, topic_title)
+            if t_intent is not None:
+                try:
+                    meta, _, _ = select_stock_visual(t_intent, out_path, used_hashes, ctx={"video_title": topic_title})
+                except Exception:  # noqa: BLE001
+                    meta = None
+                if meta is None:
+                    stock_ok = False  # topic stock is used up; don't search again
+                else:
+                    meta = dict(meta, topic_fallback=True)
+        if meta is None:
+            meta = _ai_generate(flux_prompt(intent, variant=variant), out_path, seed=variant + len(rows))
         if not meta:
-            break  # FLUX (Cloudflare and NVIDIA) unavailable / rate limited: gradients fill the gap
+            break  # stock used up and FLUX (Cloudflare and NVIDIA) unavailable: gradients fill the gap
         try:
             _save_portrait(out_path)
             meta["sha256"] = __import__("hashlib").sha256(out_path.read_bytes()).hexdigest()
@@ -369,18 +408,20 @@ def top_up_ai_frames(out_dir: Path, shots_needed: int) -> int:
             **{k: meta.get(k, "") for k in ("provider", "source_url", "asset_id", "license", "license_url",
                                            "retrieved_at", "sha256")},
             **({"fallback_for": meta["fallback_for"]} if meta.get("fallback_for") else {}),
-            "relevance_score": None, "max_shot_seconds": None, "max_uses": 2,
+            "relevance_score": meta.get("relevance_score"),
+            "max_shot_seconds": 5 if meta.get("provider") in THIRD_PARTY_PROVIDERS else None,
+            "max_uses": max_uses_for(meta.get("provider", "")),
             "segment_index": base.get("segment_index", 0), "clip": None, "top_up": True,
         })
-        capacity += 2
-        ai_count += 1
+        capacity += max_uses_for(meta.get("provider", ""))
+        ai_count += 1 if meta.get("provider") in AI_IMAGE_PROVIDERS else 0
         added += 1
     if added:
         data["assets"] = rows
         data["credits"] = _generic_visual_credits(rows)
         data["provider_limits"] = _provider_limits()
         manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        log(f"Added {added} FLUX frame(s) so no frame appears more than twice")
+        log(f"Added {added} top-up frame(s) (topic stock first, then FLUX) so no frame repeats past its cap")
     return added
 
 

@@ -23,8 +23,8 @@ script:
       template: "{topic} changes everything. Here's what happens next."
       when: "major announcement or product launch with downstream implications"
     - id: explainer
-      template: "{concrete_number_or_fact} - that's how {topic} actually works, and it's not what you think."
-      when: "complex topic with widespread misunderstanding; open on the surprising number, never on setup"
+      template: "{one plain sentence, max 12 words, stating the most surprising real number or claim about {topic}}."
+      when: "complex topic or how-it-works explainer; say it like a person would (e.g. 'An AI can spot a broken wrist faster than most doctors.'), never a fragment plus a dash, never setup"
     - id: comparison
       template: "{thing_a} vs {thing_b}. One of these wins and it's not close."
       when: "two competing products, companies, or approaches"
