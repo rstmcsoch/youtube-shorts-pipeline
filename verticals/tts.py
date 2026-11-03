@@ -111,6 +111,20 @@ def pace_speed(words: int, seconds: float, speed: float, lo: float = WPM_MIN, hi
 VO_MAX_SILENCE_PAD = 1.5  # seconds of trailing silence instead of a full re-render
 
 
+def secant_speed(p0: tuple, p1: tuple, lo: float = WPM_MIN, hi: float = WPM_MAX, target: float = WPM_TARGET):
+    """Speed for `target` WPM interpolated from two measured (speed, wpm) renders, or None when
+    p1 is already in band. Falls back to the proportional rule when the two points are flat."""
+    (s0, w0), (s1, w1) = p0, p1
+    if lo <= w1 <= hi or w1 <= 0:
+        return None
+    if abs(w1 - w0) > 1e-6 and abs(s1 - s0) > 1e-6:
+        new = s1 + (target - w1) * (s1 - s0) / (w1 - w0)
+    else:
+        new = s1 * target / w1
+    new = round(min(KOKORO_MAX_SPEED, max(KOKORO_MIN_SPEED, new)), 3)
+    return None if abs(new - s1) < 0.01 else new
+
+
 def short_padding_seconds(seconds: float, lo: float = VO_MIN_SECONDS, max_pad: float = VO_MAX_SILENCE_PAD) -> float:
     """Trailing silence that lifts a voiceover just under the window into it, else 0.
 
@@ -251,9 +265,19 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
         if paced is not None:
             log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM outside {lo_wpm:.0f}-{hi_wpm:.0f}; "
                 f"re-rendering at speed {paced}")
+            first = (cfg["speed"], n_words / seconds * 60.0)
             samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=paced, lang=kokoro_lang)
             cfg["speed"] = paced
             seconds = len(samples) / float(sample_rate)
+            # Kokoro's pace is not linear in speed (draft job-mw0rja3o: 117 WPM at 1.08 -> 170 WPM at
+            # 1.4), so one more render interpolates between the two measured points if needed.
+            again = secant_speed(first, (paced, n_words / seconds * 60.0), lo_wpm, hi_wpm, tg_wpm)
+            if again is not None:
+                log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM at speed {paced} still outside "
+                    f"{lo_wpm:.0f}-{hi_wpm:.0f}; re-rendering at speed {again}")
+                samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=again, lang=kokoro_lang)
+                cfg["speed"] = again
+                seconds = len(samples) / float(sample_rate)
         pad = short_padding_seconds(seconds)
         if pad:
             import numpy as np

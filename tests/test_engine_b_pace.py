@@ -35,6 +35,13 @@ def test_pace_speed_empty_inputs():
     assert tts.pace_speed(0, 10, 1.08) is None and tts.pace_speed(10, 0, 1.08) is None
 
 
+def _wpm(wpm_at_108, speed, exponent=1.0):
+    return wpm_at_108 * (speed / 1.08) ** exponent
+
+
+EXPONENT = {"value": 1.0}
+
+
 def _fake_kokoro(monkeypatch, wpm_at_108: float, calls: list):
     class FakeKokoro:
         def __init__(self, *a, **k):
@@ -43,7 +50,7 @@ def _fake_kokoro(monkeypatch, wpm_at_108: float, calls: list):
         def create(self, script, voice, speed, lang):
             calls.append(speed)
             words = len(script.split())
-            seconds = words / (wpm_at_108 * speed / 1.08) * 60.0
+            seconds = words / _wpm(wpm_at_108, speed, EXPONENT['value']) * 60.0
             return np.full(int(seconds * SR), 0.2, dtype=np.float32), SR
 
     monkeypatch.setitem(sys.modules, "kokoro_onnx", types.SimpleNamespace(Kokoro=FakeKokoro))
@@ -77,3 +84,24 @@ def test_short_script_is_not_slowed_below_band(monkeypatch, tmp_path):
     _fake_kokoro(monkeypatch, 158.0, calls)
     tts._generate_kokoro(" ".join(["word"] * 100), tmp_path, "en")   # 38 s at 158 WPM
     assert calls == [1.08]
+
+
+def test_secant_speed_corrects_overshoot():
+    # measured on the runner: 117 WPM at 1.08, 170 WPM at 1.4
+    s = tts.secant_speed((1.08, 117.0), (1.4, 170.0))
+    assert 1.28 < s < 1.36
+    assert tts.secant_speed((1.08, 117.0), (1.3, 158.0)) is None
+
+
+def test_nonlinear_voice_lands_in_band_with_third_render(monkeypatch, tmp_path):
+    EXPONENT["value"] = 1.44          # Kokoro's pace grows faster than its speed setting
+    try:
+        calls = []
+        _fake_kokoro(monkeypatch, 117.0, calls)
+        script = " ".join(["word"] * 138)
+        tts._generate_kokoro(script, tmp_path, "en")
+        assert len(calls) == 3
+        final = _wpm(117.0, calls[-1], 1.44)
+        assert 150 <= final <= 165
+    finally:
+        EXPONENT["value"] = 1.0
