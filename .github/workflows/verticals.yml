@@ -306,7 +306,9 @@ jobs:
       # +faststart), a scrubber thumbnail strip, captions (WebVTT), thumbnail and qc.json go to
       # Cloudflare R2 under drafts/<job_id>/ (S3 API). Any failure only warns: the console then
       # falls back to the GitHub artifacts.
-      - name: Store draft in Cloudflare R2 (full quality + review copy)
+      # The Short is also packaged as an HLS stream (2 s fMP4 parts, 360p/540p/720p + 1080p for a
+      # 1080p original) under drafts/<job_id>/hls/, so the console streams it in small parts.
+      - name: Store draft in Cloudflare R2 (full quality + streaming copy)
         continue-on-error: true
         timeout-minutes: 20
         env:
@@ -314,6 +316,7 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          DYPOL_HLS: ${{ vars.DYPOL_HLS || '1' }}
         run: |
           python -m pip install --quiet --disable-pip-version-check boto3 \
             || { echo "::warning::boto3 install failed; the console will use the GitHub artifacts"; exit 0; }
