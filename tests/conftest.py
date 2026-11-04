@@ -83,3 +83,15 @@ def _no_real_provider_keys(monkeypatch):
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.setenv("DYPOL_MUSIC_ENABLED", "0")
     monkeypatch.setenv("DYPOL_NVIDIA_FLUX_MIN_INTERVAL", "0")
+
+
+@pytest.fixture(autouse=True)
+def _legacy_drafts_skip_topic_check(monkeypatch, request):
+    """Older draft tests use stub scripts ("This is a test script..."), which the topic-relevance check
+    (4 Nov 2026) would reject and retry. They run with the check off and no real backoff sleeps;
+    tests/test_engine_b_quality_guard.py turns it back on."""
+    if "quality_guard" in request.node.nodeid:
+        return
+    monkeypatch.setenv("DYPOL_TOPIC_CHECK", "0")
+    from verticals import draft
+    monkeypatch.setattr(draft, "_sleep", lambda s: None)

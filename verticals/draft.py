@@ -158,8 +158,10 @@ def _enforce_hook(draft: dict, prompt: str, provider: str | None, research: str 
         prompt + "\n\nHOOK CORRECTION: your previous script started: \"" + " ".join(script.split()[:30]) + "...\". "
         "Problems: " + "; ".join(problems) + ". Rewrite the opening so sentence 1 is ONE complete, plain, "
         "conversational English sentence of at most 12 words (subject + verb, no dash, no fragment) stating the "
-        "most surprising concrete claim, and a real, checkable number (a figure, percentage, year or count from the "
-        "research, copied exactly; never a number that is not in the research) is spoken within the first 20 words. "
+        "most surprising concrete claim. Sentence 1 itself MUST contain a concrete number copied exactly from the "
+        "research, in digits (a figure, percentage or count; never a number that is not in the research), or, only "
+        "if the research has no usable figure, a surprising concrete specific (a measured comparison such as "
+        "'faster than a radiologist', a speed such as 'every millisecond', a size). "
         "Example shape: 'An AI can spot a broken wrist faster than most doctors.' No setup such as 'let me explain', "
         "'in sixty seconds', 'that is how', 'most people get this wrong', and delete filler lines such as "
         "'Here is the thing.' anywhere in the script. Keep the rest of the script, the beats and the length, and "
@@ -433,7 +435,7 @@ RULES:
 - Anti-hallucination: only use factual claims supported by the research above; do not invent facts, names, numbers, quotes, or events.
 - STRICT DYPOL PRIVACY/STYLE RULE: Do not include any personal names of real people anywhere in any output field. This applies to the narration script, YouTube title, YouTube description, tags, Instagram caption, TikTok caption, thumbnail prompt, and every b-roll prompt. Do not name public figures, executives, creators, politicians, researchers, or any other individual, even when their names appear in the topic or research. Refer to people only by role or generic description (for example, "the company's CEO", "a technology researcher", or "the platform's founder"). Company, product, organization, and place names are allowed when relevant; individual people's names are not.
 - Before returning JSON, review every field and remove personal names, including names embedded in quoted text, examples, hashtags, or thumbnail/on-screen-text instructions. If the topic cannot be covered accurately without a person's name, rewrite it as a general explanation rather than including the name.
-- HOOK (the first word is spoken within 0.8 s): sentence 1 IS the hook. One complete, plain, conversational English sentence of at most 12 words, the way you would say it to a friend: a concrete, surprising claim or a real number from the research, with a subject and a verb. Good: "An AI can spot a broken wrist faster than most doctors." / "Your earbuds flip sound waves upside down 50,000 times a second." Bad: "Ten picometers—that is how AI reads your X-rays." (a fragment plus a dash), "Let me explain how X works in sixty seconds." (setup). Never open with a bare number phrase followed by a dash, and never use "let me explain", "in sixty seconds", "here is the thing", "that is how", "most people get this wrong", a greeting or a channel name. Do not use filler lines such as "Here is the thing." anywhere; go straight to the next fact.
+- HOOK (the first word is spoken within 0.8 s): sentence 1 IS the hook. One complete, plain, conversational English sentence of at most 12 words, the way you would say it to a friend: a concrete, surprising claim with a subject and a verb that CONTAINS a real number from the research written in digits (or, only if the research has no usable figure, a surprising concrete specific: a measured comparison, a speed or a size). A hook with neither is rejected. Good: "An AI can spot a broken wrist faster than most doctors." / "Your earbuds flip sound waves upside down 50,000 times a second." Bad: "Ten picometers—that is how AI reads your X-rays." (a fragment plus a dash), "Let me explain how X works in sixty seconds." (setup). Never open with a bare number phrase followed by a dash, and never use "let me explain", "in sixty seconds", "here is the thing", "that is how", "most people get this wrong", a greeting or a channel name. Do not use filler lines such as "Here is the thing." anywhere; go straight to the next fact.
 {beat_rules['hook']}
 - The first broll_prompt / visual_intent must be the single most striking, high-motion visual for the story (it is the opening shot): concrete and immediately readable, never an abstract background.
 - LENGTH: the script must be {SCRIPT_MIN_WORDS}-{min(max_words, SCRIPT_MAX_WORDS)} words so the voiceover lands between 45 and 75 seconds.
@@ -532,7 +534,94 @@ Output JSON exactly:
         draft["platform"] = platform
         return draft
 
-    draft = _generate_json_response(prompt, provider)
-    draft = _enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider, research)
-    draft = finalize(_enforce_structure(draft, prompt, provider, research))
-    return _enforce_no_personal_names(draft, prompt, provider, finalize)
+    def one_draft(extra: str) -> dict:
+        draft = _generate_json_response(prompt + extra, provider)
+        draft = _enforce_hook(_enforce_script_length(draft, prompt, provider), prompt, provider, research)
+        draft = finalize(_enforce_structure(draft, prompt, provider, research))
+        return _enforce_no_personal_names(draft, prompt, provider, finalize)
+
+    return _strong_on_topic_draft(one_draft, news, provider)
+
+
+class ScriptModelUnavailableError(RuntimeError):
+    """No strong model wrote an on-topic script within the script budget (~10 min)."""
+
+    failure_category = "llm_unavailable"
+
+
+SCRIPT_BACKOFF_S = (30, 60, 90, 120)   # between whole draft attempts (the last value repeats)
+SCRIPT_ATTEMPT_EST_S = 45               # rough cost of one attempt that hits 503s, so the next one fits
+_sleep = __import__("time").sleep       # patched in tests
+_clock = __import__("time").monotonic   # patched in tests
+
+
+def _script_budget_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("DYPOL_SCRIPT_BUDGET_S", "600")))
+    except ValueError:
+        return 600.0
+
+
+def _topic_check_enabled() -> bool:
+    return os.environ.get("DYPOL_TOPIC_CHECK", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def script_relevance(news: str, script: str, provider: str | None) -> dict:
+    """Keyword relevance (topic_guard); a borderline script is settled by the best available strong model."""
+    from . import topic_guard as tg
+    if not _topic_check_enabled():
+        return {"verdict": "not_checked", "reasons": ["DYPOL_TOPIC_CHECK=0"]}
+    result = tg.relevance(news, script)
+    if result["verdict"] == tg.BORDERLINE:
+        try:
+            from . import llm
+            raw = call_llm(tg.judge_prompt(news, script), provider=provider, max_tokens=200,
+                           response_mime_type="application/json", timeout=60)
+            result = tg.apply_judge(result, tg.parse_judge(raw), llm.LAST_MODEL)
+        except Exception as exc:  # noqa: BLE001 - the keyword verdict stands
+            log(f"Topic relevance model check skipped ({str(exc)[:120]})")
+    return result
+
+
+def _strong_on_topic_draft(one_draft, news: str, provider: str | None) -> dict:
+    """Run one_draft(extra) with strong models only and check the script against the topic.
+
+    Weak fallback models ('*-lite') never write the script. When the strong models are unavailable, or the
+    script is off topic (3 tries at most), it waits with backoff (30, 60, 90, 120 s) for up to
+    $DYPOL_SCRIPT_BUDGET_S (600 s), then raises ScriptModelUnavailableError ("script model unavailable"),
+    so no weak video is produced."""
+    from . import llm
+    from . import topic_guard as tg
+    budget = _script_budget_s()
+    deadline = _clock() + budget
+    attempt, off_topic_tries, extra, last_reason = 0, 0, "", ""
+    while True:
+        attempt += 1
+        try:
+            with llm.strong_models_only():
+                draft = one_draft(extra)
+                model = llm.LAST_MODEL
+                rel = script_relevance(news, str(draft.get("script", "")), provider)
+            if rel["verdict"] != tg.OFF_TOPIC:
+                log(f"Topic check: {rel['verdict']} (script model {model})"
+                    + (f": {'; '.join(rel.get('reasons') or [])[:200]}" if rel["verdict"] == tg.BORDERLINE else ""))
+                draft["script_check"] = {"model": model, "attempts": attempt, "relevance": rel}
+                return draft
+            off_topic_tries += 1
+            last_reason = "off-topic script (" + "; ".join(rel.get("reasons") or [])[:300] + ")"
+            log(f"Topic check: {last_reason}")
+            extra = tg.correction_note(news, rel)
+            if off_topic_tries >= 3:
+                break
+        except llm.LLMUnavailableError as exc:
+            last_reason = f"strong models unavailable ({str(exc)[:200]})"
+            log(f"Script: {last_reason}")
+        wait = SCRIPT_BACKOFF_S[min(attempt - 1, len(SCRIPT_BACKOFF_S) - 1)]
+        if _clock() + wait + SCRIPT_ATTEMPT_EST_S > deadline:
+            break
+        log(f"Script: waiting {wait}s before trying again (budget {budget:.0f}s)")
+        _sleep(wait)
+    print("DYPOL_FAILURE_CATEGORY=llm_unavailable", flush=True)
+    raise ScriptModelUnavailableError(
+        f"{tg.SCRIPT_UNAVAILABLE}: no strong model wrote an on-topic script for '{news}' after {attempt} "
+        f"attempt(s) within {budget:.0f}s; last problem: {last_reason}")

@@ -19,6 +19,35 @@ from .config import (
 from .log import log
 from .retry import with_retry
 
+import contextlib
+import threading
+
+LAST_MODEL = ""          # the model (or provider) that answered the most recent call_llm
+_STRONG = threading.local()
+
+
+class LLMUnavailableError(RuntimeError):
+    """Every usable model failed with a transient error (503/429/network), or no strong model is configured."""
+
+    failure_category = "llm_unavailable"
+
+
+@contextlib.contextmanager
+def strong_models_only():
+    """Inside this block the Gemini chain skips weak models ('*-lite', see topic_guard.is_weak_model).
+
+    Scripts are written only by strong models: on 3 Nov flash-lite wrote an off-topic earbuds script."""
+    before = getattr(_STRONG, "on", False)
+    _STRONG.on = True
+    try:
+        yield
+    finally:
+        _STRONG.on = before
+
+
+def strong_only_active() -> bool:
+    return bool(getattr(_STRONG, "on", False))
+
 
 def get_provider(name: str | None = None) -> str:
     """Resolve which LLM provider to use.
@@ -91,8 +120,11 @@ def call_llm(
     Returns:
         The LLM response text.
     """
+    global LAST_MODEL
     provider = get_provider(provider)
     log(f"Calling LLM via {provider}...")
+    if provider != "gemini":
+        LAST_MODEL = provider
 
     if provider == "claude":
         return _call_claude(prompt, max_tokens)
@@ -164,6 +196,7 @@ def _call_gemini(
     timeout: int | None = None,
 ) -> str:
     """Call Gemini with a short fallback cascade for transient model capacity errors."""
+    global LAST_MODEL
     import time
     import requests
 
@@ -176,6 +209,11 @@ def _call_gemini(
         "GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash-lite"
     )
     models = list(dict.fromkeys([primary] + [m.strip() for m in configured.split(",") if m.strip()]))
+    if strong_only_active():
+        from .topic_guard import strong_models
+        models = strong_models(models)
+        if not models:
+            raise LLMUnavailableError("No strong Gemini model is configured (weak models are skipped for scripts)")
     last_error = None
 
     for index, model in enumerate(models):
@@ -197,7 +235,7 @@ def _call_gemini(
         except requests.RequestException as exc:
             last_error = exc
             if index == len(models) - 1:
-                raise RuntimeError(f"Gemini request failed for all configured models: {exc}") from exc
+                raise LLMUnavailableError(f"Gemini request failed for all configured models: {exc}") from exc
             log(f"Gemini model {model} network error; trying fallback {models[index + 1]}.")
             time.sleep(min(2 ** index, 4))
             continue
@@ -216,6 +254,8 @@ def _call_gemini(
                 )
                 time.sleep(min(2 ** index, 4))
                 continue
+            if response.status_code in (408, 429, 500, 502, 503, 504):
+                raise LLMUnavailableError(f"Gemini API {response.status_code} ({model}): {detail}")
             hint = ""
             if response.status_code == 403:
                 hint = (
@@ -228,6 +268,7 @@ def _call_gemini(
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         text = " ".join(p.get("text", "") for p in parts).strip()
         if text:
+            LAST_MODEL = model
             if index:
                 log(f"Gemini request succeeded with fallback model {model}.")
             return text
@@ -237,7 +278,7 @@ def _call_gemini(
             log(f"Gemini model {model} returned empty text; trying fallback {models[index + 1]}.")
             time.sleep(min(2 ** index, 4))
 
-    raise last_error or RuntimeError("All configured Gemini models failed.")
+    raise LLMUnavailableError(str(last_error or "All configured Gemini models failed."))
 
 
 def _call_openai(prompt: str, max_tokens: int) -> str:

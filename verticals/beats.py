@@ -444,6 +444,30 @@ def variety_ok(beats: list[dict]) -> bool:
 
 # "Ten picometers—that is how AI reads your X-rays" (draft 5): a bare noun phrase, a dash,
 # then a clause. A short lead-in followed by a dash reads oddly when spoken aloud.
+# Owner rule (4 Nov 2026): the hook sentence carries a concrete number or a surprising specific.
+HOOK_NUMBER_RE = re.compile(
+    r"\d|\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|"
+    r"seventy|eighty|ninety|hundreds?|thousands?|millions?|billions?|trillions?|dozens?|half|twice|double|triple|"
+    r"percent)\b", re.I)
+HOOK_SPECIFIC_RE = re.compile(
+    r"\b(faster|slower|smaller|bigger|larger|cheaper|better|worse|more|fewer|less|longer|shorter|stronger|"
+    r"quieter|louder|sharper|earlier|later)\s+(\w+\s+){0,4}?than\b"
+    r"|\b(milli|micro|nano|pico)(seconds?|meters?|metres?|watts?)\b"
+    r"|\b(every|per|each|a|an)\s+(second|minute|hour|day|heartbeat|blink)\b"
+    r"|\btimes\s+(a|per|faster|more|less|smaller|bigger)\b"
+    r"|\b(world's|fastest|slowest|smallest|largest|biggest)\b", re.I)
+
+
+def hook_specific(script: str) -> str:
+    """'number' or 'specific' when sentence 1 (the hook) has one, else ''."""
+    first = first_sentence(script)
+    if HOOK_NUMBER_RE.search(first):
+        return "number"
+    if HOOK_SPECIFIC_RE.search(first):
+        return "specific"
+    return ""
+
+
 HOOK_FRAGMENT_RE = re.compile(r"^\W*(\S+\s+){0,3}\S*?\s*(—|–|--|\s-\s)")
 _APOS = str.maketrans({"\u2019": "'", "\u2018": "'"})
 
@@ -488,6 +512,9 @@ def hook_warnings(script: str) -> list[str]:
     n_first = len(first.split())
     if n_first > max_words:
         out.append(f"hook: sentence 1 has {n_first} words (max {max_words}); say one plain claim")
+    if not hook_specific(script):
+        out.append("hook: sentence 1 has no concrete number or surprising specific; state a figure from the "
+                   "research, or a measured comparison, speed or size")
     if HOOK_FRAGMENT_RE.search(first):
         out.append("hook: opens with a fragment and a dash; say it as one plain conversational sentence")
     opening = " ".join(sentences(script)[:2])

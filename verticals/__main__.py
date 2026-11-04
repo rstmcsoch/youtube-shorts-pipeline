@@ -40,7 +40,7 @@ def cmd_draft(args):
     provider = getattr(args, "provider", None)
 
     print(f"\n  Drafting: {args.news} [niche: {niche}, platform: {platform}]\n")
-    from .draft import PersonalNamesError
+    from .draft import PersonalNamesError, ScriptModelUnavailableError
     try:
         draft = generate_draft(
             args.news,
@@ -54,6 +54,11 @@ def cmd_draft(args):
         # Fail fast before any media is fetched or rendered.
         print(f"\n  ERROR: {exc}")
         sys.exit(3)
+    except ScriptModelUnavailableError as exc:
+        # No strong model wrote an on-topic script within ~10 min: fail clearly, never make a weak video.
+        print("DYPOL_FAILURE_CATEGORY=llm_unavailable", flush=True)
+        print(f"\n  ERROR: {exc}")
+        sys.exit(4)
     draft["job_id"] = job_id
 
     out_path = DRAFTS_DIR / f"{job_id}.json"
@@ -305,6 +310,8 @@ def cmd_produce(args):
                                        "contact_sheet": str(qc_sheet) if qc_sheet.exists() else ""}
             except (OSError, ValueError):
                 pass
+        # Hard failures (off-topic script, resolution, static > 3.5 s) mark the draft "needs fixes".
+        mark_quality(draft, qc_json if qc_json.exists() else None, lang)
         # Post-render AI visual check (no-op when the judge is disabled; never blocks).
         from .broll import judge_contact_sheet
         manifest_path = work_dir / "broll_manifest.json"
@@ -327,6 +334,34 @@ def cmd_produce(args):
 
     print(f"\n  Video: {video_path}")
     return video_path
+
+
+def mark_quality(draft, qc_json, lang="en"):
+    """draft["quality"] / draft["needs_fixes"] from the QC hard failures and the script topic check."""
+    import json
+    from .qc import hard_failures
+    try:
+        report = json.loads(Path(qc_json).read_text(encoding="utf-8")) if qc_json else {}
+    except (OSError, ValueError):
+        report = {}
+    relevance = ((draft.get("script_check") or {}).get("relevance")) or {}
+    failures = hard_failures(report, relevance=relevance)
+    quality = draft.get("quality") if isinstance(draft.get("quality"), dict) else {}
+    found = [f for f in quality.get("hard_failures") or [] if not f.startswith(f"{lang}: ")]
+    found += [f"{lang}: {f}" for f in failures]
+    quality = {"verdict": "needs_fixes" if found else "ok", "hard_failures": found,
+               "script_model": (draft.get("script_check") or {}).get("model", ""),
+               "topic_check": relevance.get("verdict", "not_run")}
+    draft["quality"] = quality
+    draft["needs_fixes"] = bool(found)
+    if found:
+        draft["review_required"] = True
+        reasons = draft.setdefault("review_reasons", [])
+        for f in found:
+            if f"Needs fixes: {f}" not in reasons:
+                reasons.append(f"Needs fixes: {f}")
+        print("DYPOL_DRAFT_VERDICT=needs_fixes: " + "; ".join(found), flush=True)
+    return quality
 
 
 def _record_voice_meta(work_dir):

@@ -269,6 +269,9 @@ jobs:
               "title": draft.get("youtube_title", ""),
               "topic": draft.get("news", ""),
               "review_required": bool(draft.get("review_required", True)),
+              # Hard QC failures (off-topic script, resolution, static > 3.5 s): the draft "needs fixes".
+              "needs_fixes": bool(draft.get("needs_fixes", False)),
+              "quality": draft.get("quality") or {"verdict": "not_checked"},
               "visual_manifest": draft.get("broll_manifest", ""),
               # status.containsSyntheticMedia the publish step will send + who made the stills.
               "contains_synthetic_media": bool(draft.get("contains_synthetic_media", False)),
@@ -508,6 +511,11 @@ jobs:
           CAPTIONS=()
           while IFS= read -r -d '' FILE; do CAPTIONS+=(--captions "$FILE"); done < <(find "$VERTICALS_HOME/media" -type f \( -name '*.srt' -o -name '*.vtt' \) -print0)
           python scripts/validate_no_personal_names.py --draft "$DRAFT" "${CAPTIONS[@]}" 2>&1 | tee -a "$RUNNER_TEMP/dypol-publish.log"
+
+      - name: Block auto-publish of a draft that needs fixes
+        if: ${{ inputs.phase == 'full' }}
+        run: |
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit('::error::The draft needs fixes (hard QC failure), so it is not auto-published.' if d.get('needs_fixes') else 0)" "$DRAFT"
 
       - name: Upload the reviewed video to YouTube
         env:

@@ -5,7 +5,8 @@ audio and blackdetect on the picture while a 4x4 contact sheet is tiled from 16
 evenly spaced frames. blackdetect uses pix_th=0.03 so the DYPOL slate background
 (#0F141C) is not mistaken for black. freezedetect runs on the pre-grade, pre-caption merge
 (grain and captions would hide a frozen picture in the final). Results go to
-qc.json next to the video. QC only ever warns: it never raises and never blocks.
+qc.json next to the video. QC never raises and never blocks; hard failures (resolution, static > 3.5 s,
+plus an off-topic script in __main__) mark the draft "needs fixes".
 """
 
 import json
@@ -20,6 +21,44 @@ LUFS_TOLERANCE = 1.0
 TRUE_PEAK_MAX = -1.0
 SILENCE = {"noise_db": -35, "min_s": 0.6}
 FREEZE_MIN_S = 3.5
+# Hard failures (owner rules): the draft is still saved, but it is marked "needs fixes".
+HARD_STATIC_S = 3.5
+SHORT_RES = ((720, 1280), (1080, 1920))   # 9:16, 720p-1080p, never upscaled
+
+
+def _size(path: Path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                        "-of", "csv=p=0:s=x", str(path)], capture_output=True, text=True, timeout=60)
+    try:
+        w, h = (int(v) for v in r.stdout.strip().split("x")[:2])
+        return w, h
+    except ValueError:
+        return None, None
+
+
+def resolution_problem(width, height, bounds=SHORT_RES) -> str:
+    if not width or not height:
+        return ""
+    (lo_w, lo_h), (hi_w, hi_h) = bounds
+    if not (lo_w <= width <= hi_w and lo_h <= height <= hi_h):
+        return f"resolution {width}x{height} is outside {lo_w}x{lo_h}-{hi_w}x{hi_h}"
+    return ""
+
+
+def hard_failures(report: dict | None, relevance: dict | None = None) -> list[str]:
+    """Owner-rule failures that mark the draft "needs fixes": off-topic script, resolution outside
+    720p-1080p (9:16), a static picture longer than 3.5 s."""
+    out = []
+    if isinstance(relevance, dict) and relevance.get("verdict") == "off_topic":
+        out.append("off-topic script: " + "; ".join(relevance.get("reasons") or [])[:300])
+    report = report or {}
+    problem = resolution_problem(report.get("width"), report.get("height"))
+    if problem:
+        out.append(problem)
+    for f in report.get("freezes") or []:
+        if (f.get("duration") or 0) > HARD_STATIC_S:
+            out.append(f"picture static for {f['duration']:.1f} s at {f['start']:.2f} s (limit {HARD_STATIC_S:g} s)")
+    return out
 
 
 def _duration(path: Path) -> float:
@@ -93,6 +132,7 @@ def run_qc(video: Path, out_json: Path, contact_png: Path, merged_video: Path | 
     try:
         dur = _duration(video)
         report["duration_s"] = round(dur, 3)
+        report["width"], report["height"] = _size(video)
         fc = (f"[0:a]ebur128=peak=true,silencedetect=noise={SILENCE['noise_db']}dB:d={SILENCE['min_s']}[ao];"
               f"[0:v]split=2[v1][v2];[v1]blackdetect=d=0.5:pix_th=0.03[vo];"
               f"[v2]fps=16/{max(dur, 1.0):.3f},scale=270:480,tile=4x4[sheet]")
@@ -121,12 +161,18 @@ def run_qc(video: Path, out_json: Path, contact_png: Path, merged_video: Path | 
     report["warnings"] = qc_warnings(report)
     if report["warnings"] or report["errors"]:
         report["status"] = "warn"
+    report["hard_failures"] = hard_failures(report)
+    report["verdict"] = "needs_fixes" if report["hard_failures"] else "ok"
+    if report["hard_failures"]:
+        report["status"] = "warn"
     try:
         out_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
     except OSError as exc:
         log(f"QC: could not write {out_json}: {exc}")
     for w in report["warnings"]:
         log(f"QC warning: {w}")
+    for w in report["hard_failures"]:
+        log(f"QC NEEDS FIXES: {w}")
     return report
 
 
