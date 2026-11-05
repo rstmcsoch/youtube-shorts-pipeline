@@ -118,6 +118,9 @@ jobs:
       CONTEXT: ${{ inputs.context || '' }}
       LANGUAGE: ${{ inputs.language || 'en' }}
       KOKORO_MODEL_DIR: ${{ github.workspace }}/.kokoro-cache
+      # Timestamped Kokoro-82M (same voice + per-phoneme durations): exact caption/motion sync.
+      # Missing or failing its SHA-256 -> plain model renders and Whisper times the words.
+      KOKORO_TIMED_MODEL: ${{ github.workspace }}/.kokoro-ts-cache/kokoro-v1.0-timestamped.onnx
       # Console contract: input -> repo variable -> brand default. Invalid voices log and use am_michael.
       DYPOL_VOICE: ${{ inputs.voice || vars.DYPOL_DEFAULT_VOICE || 'am_michael' }}
       DYPOL_PATTERN: ${{ inputs.design_pattern || vars.DYPOL_DEFAULT_PATTERN || 'elements' }}
@@ -208,6 +211,28 @@ jobs:
           printf '%s  %s\n' \
             7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5 kokoro-v1.0.onnx \
             bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d voices-v1.0.bin | sha256sum -c -
+
+      - name: Cache timestamped Kokoro-82M model
+        id: kokoro-ts-cache
+        uses: actions/cache@v4
+        with:
+          path: .kokoro-ts-cache
+          key: kokoro-82m-v1.0-onnx-timestamped-dd4401a9
+
+      - name: Download timestamped Kokoro-82M model (onnx-community, pinned revision, Apache-2.0)
+        if: ${{ steps.kokoro-ts-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REV=dd4401a9add81ac692d20e240d22ec9dda82cc29
+          # never leave a partial file for the cache to save
+          trap 'rm -f "$KOKORO_TIMED_MODEL" "$KOKORO_TIMED_MODEL.part"' ERR
+          mkdir -p "$(dirname "$KOKORO_TIMED_MODEL")"
+          curl -fsSL --retry 3 -o "$KOKORO_TIMED_MODEL.part" \
+            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX-timestamped/resolve/$REV/onnx/model.onnx"
+          echo "651ea8291843a92276a4a003581a215cb07d15e47dde6fcfb1b768f9a1682054  $KOKORO_TIMED_MODEL.part" | sha256sum -c -
+          mv "$KOKORO_TIMED_MODEL.part" "$KOKORO_TIMED_MODEL"
+          ls -l "$KOKORO_TIMED_MODEL"
 
       - name: Validate DYPOL job ID and Gemini key
         run: |

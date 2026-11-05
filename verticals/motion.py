@@ -157,6 +157,120 @@ def draw_hero_icon(img: Image.Image, name: str, cx: float, cy: float, size: int,
     paste_scaled(img, spr, x, y, 0.85 + 0.15 * appear, appear)
 
 
+# ── word cues: an element appears when the narration says its word ─────────────
+# data["cues"][i] (seconds from the block's own t=0) is when element i (a kinetic word,
+# a diagram node, the count-up number) starts to appear. Set from the TTS word timings
+# (timestamped Kokoro, phoneme-exact) by cue_data(); elements whose word is not spoken
+# in the block keep the default stagger.
+def _cue_tok(text) -> str:
+    import re
+    return re.sub(r"[^a-z0-9%]", "", str(text).casefold())
+
+
+def _tok_match(el: str, spoken: str) -> bool:
+    if not el or not spoken:
+        return False
+    if el == spoken:
+        return True
+    short, long_ = sorted((el, spoken), key=len)
+    return len(short) >= 3 and long_.startswith(short) and len(long_) - len(short) <= 3  # plural / possessive
+
+
+def word_cues(elements: list, words: list | None, start: float, end: float) -> list:
+    """For each on-screen element, seconds from `start` at which its word starts being
+    spoken inside [start, end), or None. Elements are matched in order (the first spoken
+    occurrence after the previous element's word wins, else any unused one)."""
+    window = []
+    for w in words or []:
+        try:
+            ws = float(w["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start - 0.05 <= ws < end:
+            window.append((ws, _cue_tok(w.get("word", ""))))
+    cues, used, last = [], set(), -1
+    for el in elements or []:
+        toks = [t for t in (_cue_tok(x) for x in str(el).split()) if t]
+        found = None
+        for order in (range(last + 1, len(window)), range(len(window))):
+            for k in order:
+                if k not in used and any(_tok_match(t, window[k][1]) for t in toks):
+                    found = k
+                    break
+            if found is not None:
+                break
+        if found is None:
+            cues.append(None)
+            continue
+        used.add(found)
+        last = max(last, found)
+        cues.append(round(max(0.0, window[found][0] - start), 3))
+    return cues
+
+
+def cue_data(kind: str, data: dict, words: list | None, start: float, end: float) -> dict:
+    """`data` with "cues" set from the narration word timings for a block spanning
+    [start, end) of the voiceover; unchanged when nothing on screen is spoken there."""
+    if not words or not isinstance(data, dict):
+        return data
+    out = dict(data)
+    if kind == "kinetic_text":
+        cues = word_cues(list(data.get("words") or [])[:4], words, start, end)
+    elif kind == "diagram":
+        cues = word_cues(list(data.get("nodes") or [])[:4], words, start, end)
+    elif kind == "count_up":
+        num = None
+        for w in words:
+            try:
+                ws = float(w["start"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start - 0.05 <= ws < end and any(ch.isdigit() for ch in str(w.get("word", ""))):
+                num = round(max(0.0, ws - start), 3)
+                break
+        cues = [num]
+        if data.get("note"):
+            out["note_cue"] = word_cues([str(data["note"]).split()[0]], words, start, end)[0]
+    else:
+        return data
+    out.pop("cues", None)
+    if any(c is not None for c in cues):
+        out["cues"] = cues
+    return out
+
+
+CUE_MAX_GAP = 2.8  # a cue never leaves the picture unchanged longer than this (3.5 s static limit)
+
+
+def _cue_fields(data: dict) -> dict:
+    return {k: data[k] for k in ("cues", "note_cue") if isinstance(data, dict) and data.get(k) is not None}
+
+
+def spec_data(spec: dict) -> dict:
+    """What to render for a motion_cards spec: its card plus the word cues for its window."""
+    return {**spec["data"], **(spec.get("cues") or {})}
+
+
+def cue_starts(data: dict, defaults: list, max_gap: float = CUE_MAX_GAP) -> list:
+    """Per-element start times: the word cue where there is one, else the default stagger
+    (never before the previous element's start). A cue that would hold the picture still
+    for more than `max_gap` after the previous reveal (or the block start) is pulled in to
+    that limit: the no-static-hold rule outranks waiting for a late word."""
+    cues = list(data.get("cues") or []) if isinstance(data, dict) else []
+    out, prev = [], None
+    for i, d in enumerate(defaults):
+        c = cues[i] if i < len(cues) else None
+        if c is None:
+            v = d if prev is None else max(d, prev + 0.2)
+        else:
+            v = min(float(c), (prev or 0.0) + max_gap)
+            if prev is not None:
+                v = max(v, prev)
+        out.append(v)
+        prev = v
+    return out
+
+
 # ── kinetic_text ─────────────────────────────────────
 def frame_kinetic_text(data: dict, t: float, duration: float) -> Image.Image:
     words = data["words"][:4]
@@ -172,8 +286,9 @@ def frame_kinetic_text(data: dict, t: float, duration: float) -> Image.Image:
     icon = data.get("icon") or pick_icon(words)
     draw_hero_icon(img, icon, LEFT + 150, TOP + 150, 150, t, ease_out_cubic(progress(t, 0.0, 0.4)))
     drift = 1 + 0.035 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT  # slow push
+    starts = cue_starts(data, [0.10 + i * 0.26 for i in range(len(words))])
     for i, word in enumerate(words):
-        start = 0.10 + i * 0.26
+        start = starts[i]
         p = progress(t, start, 0.38)
         is_accent = word == accent
         spr = _sprite_cache(word, size, "lime" if is_accent else "body")
@@ -228,10 +343,11 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
     size = fit_size([final_text], "display_bold", 260, int((RIGHT - LEFT - 10) / 1.035), 100)
     count_len = min(1.0, max(0.6, duration * 0.35))
     settled = bool(data.get("settled"))
-    p = 1.0 if settled else progress(t, 0.15, count_len)
+    c0 = cue_starts(data, [0.15])[0]   # the count starts when the number is spoken
+    p = 1.0 if settled else progress(t, c0, count_len)
     k = ease_out_cubic(p)
     text = f"{pre}{_fmt_number(target * k, dec, year)}{suf}"
-    done_flash = 1.0 if settled else progress(t, 0.15 + count_len, 0.25)
+    done_flash = 1.0 if settled else progress(t, c0 + count_len, 0.25)
     num_color = mix(body, lime, done_flash)
     drift = 1 + 0.03 * ease_in_out_cubic(t / max(duration, 0.1)) * _DRIFT
     f = font("display_bold", int(size * drift))
@@ -256,7 +372,8 @@ def frame_count_up(data: dict, t: float, duration: float) -> Image.Image:
         d.text((LEFT + (1 - lp) * -60, my + 70), label, font=lf, fill=mix(bg, body, lp), anchor="la")
     note = data.get("note", "")
     if note:  # follow-up card: the narration's key words land under the settled number
-        np_ = ease_out_back(progress(t, 0.1, 0.4), 1.3)
+        nc = data.get("note_cue")
+        np_ = ease_out_back(progress(t, 0.1 if nc is None else float(nc), 0.4), 1.3)
         nf = font("display_bold", fit_size([note], "display_bold", 84, RIGHT - LEFT, 44))
         d.text((LEFT + (1 - np_) * 90, my + 190), note, font=nf, fill=mix(bg, color("amber"), clamp(np_)), anchor="la")
     source = data.get("source", "")
@@ -417,12 +534,13 @@ def frame_diagram(data: dict, t: float, duration: float) -> Image.Image:
     centers = []
     size = fit_size(nodes, "display_medium", 58, box_w - 200, 34)
     f = font("display_medium", size)
-    active = min(n - 1, int(max(0.0, t - 0.15) / step))
-    revealed = 0.15 + (n - 1) * step + 0.32
+    starts = cue_starts(data, [0.15 + i * step for i in range(n)])  # a node lands when it is said
+    active = max([0] + [i for i in range(n) if t >= starts[i]])
+    revealed = starts[-1] + 0.32
     if t > revealed + PULSE_S:  # all steps shown: the highlight walks the flow again
         active = int((t - revealed - PULSE_S) / PULSE_S) % n  # first pulse moves from the last node to node 1
     for i, label in enumerate(nodes):
-        start = 0.15 + i * step
+        start = starts[i]
         p = ease_out_back(progress(t, start, 0.32), 1.2)
         a = ease_out_cubic(progress(t, start, 0.25))
         if a <= 0:
@@ -596,14 +714,16 @@ def motion_cards(kind: str, data: dict, cuts: list[float], shot_start: float = 0
 
     Continuous kinds (diagram, code_panel) are one block timed across the whole beat;
     kinetic_text and count_up get a new card per sub-shot built from the narration words
-    spoken during it.
+    spoken during it. Every spec also carries "cues" (cue_data's word cues for its
+    window); render spec_data(spec) so each element appears when the narration says it.
     """
     cuts = [float(c) for c in (cuts or [])] or [0.0]
     total = sum(cuts)
     if kind in ("diagram", "code_panel") or len(cuts) == 1:
+        cues = _cue_fields(cue_data(kind, data, words, shot_start, shot_start + total))
         specs, t = [], 0.0
         for c in cuts:
-            specs.append({"kind": kind, "data": data, "duration": c, "t_offset": t, "total": total})
+            specs.append({"kind": kind, "data": data, "duration": c, "t_offset": t, "total": total, "cues": cues})
             t += c
         return specs
     specs, t, prev = [], 0.0, None
@@ -620,7 +740,8 @@ def motion_cards(kind: str, data: dict, cuts: list[float], shot_start: float = 0
         else:  # count_up: the number stays, the narration's key words land under it
             note = " ".join(spoken[:3]) or " ".join(data.get("label", "").split()[:3])
             card = {**data, "settled": True, "note": note[:28]}
-        specs.append({"kind": kind, "data": card, "duration": c, "t_offset": 0.0, "total": c})
+        cues = _cue_fields(cue_data(kind, card, words, shot_start + t, shot_start + t + c))
+        specs.append({"kind": kind, "data": card, "duration": c, "t_offset": 0.0, "total": c, "cues": cues})
         prev = card
         t += c
     return specs
@@ -656,7 +777,7 @@ def _longest_static(specs: list[dict], sample_fps: int, threshold: float) -> flo
     for spec in specs:
         n = max(1, int(round(spec["duration"] * sample_fps)))
         for i in range(n):
-            th = _thumb(render_frame(spec["kind"], spec["data"], spec["t_offset"] + i * step, spec["total"]))
+            th = _thumb(render_frame(spec["kind"], spec_data(spec), spec["t_offset"] + i * step, spec["total"]))
             if anchor is not None and 100.0 * sum(abs(a - b) >= PIXEL_DELTA for a, b in zip(anchor, th)) / len(th) < threshold:
                 run += step
             else:

@@ -123,6 +123,30 @@ def _stage_timer():
     return lap
 
 
+def script_keywords(draft: dict, limit: int = 40) -> list[str]:
+    """Key terms the script itself names, for caption highlighting: each beat's keywords,
+    the visual intents' entities, then the YouTube tags (deduplicated, in that order)."""
+    out, seen = [], set()
+
+    def add(value):
+        text = str(value or "").strip()
+        if text and text.casefold() not in seen and len(out) < limit:
+            seen.add(text.casefold())
+            out.append(text)
+    for beat in draft.get("beats") or []:
+        if isinstance(beat, dict):
+            for k in beat.get("keywords") or []:
+                add(k)
+    for intent in draft.get("visual_intents") or []:
+        if isinstance(intent, dict):
+            for e in intent.get("entities") or []:
+                add(e)
+    tags = draft.get("youtube_tags") or ""
+    for t in (tags.split(",") if isinstance(tags, str) else tags if isinstance(tags, list) else []):
+        add(t)
+    return out
+
+
 def cmd_produce(args):
     lap = _stage_timer()
     from .broll import generate_broll
@@ -252,6 +276,7 @@ def cmd_produce(args):
             font_family=caption_config.get("font_family", "Arial"),
             font_size=int(caption_config.get("font_size", 72)),
             script=script or "",
+            keywords=script_keywords(draft),
         )
         state.complete_stage("captions", {
             "srt_path": str(captions_result.get("srt_path", "")),

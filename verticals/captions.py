@@ -1,4 +1,4 @@
-"""Whisper word-level timestamps + ASS subtitle generation + Pillow fallback."""
+"""Word timings (timestamped Kokoro, else Whisper) + ASS subtitle generation + Pillow fallback."""
 
 from pathlib import Path
 
@@ -48,6 +48,23 @@ def _whisper_word_timestamps(audio_path: Path, lang: str = "en") -> list[dict]:
 
     log(f"Got {len(words)} word timestamps.")
     return words
+
+
+def tts_word_timings(audio_path: Path, script: str = "") -> list[dict]:
+    """Exact word timings the TTS wrote for this audio (timestamped Kokoro), else [].
+
+    They come from the model's own phoneme durations, so they are already in script
+    spelling and need neither Whisper nor align_words_to_script. Timings written for a
+    different script are ignored (the caller then runs Whisper)."""
+    from .tts import load_word_timings
+    words = load_word_timings(Path(audio_path))
+    if not words:
+        return []
+    if script and [w["word"] for w in words] != str(script).split():
+        log("TTS word timings do not match the script; using Whisper word timestamps")
+        return []
+    log(f"Using TTS word timings ({len(words)} words, phoneme-exact); Whisper skipped")
+    return [{"word": str(w["word"]), "start": float(w["start"]), "end": float(w["end"])} for w in words]
 
 
 def align_words_to_script(words: list[dict], script: str) -> list[dict]:
@@ -587,9 +604,11 @@ def generate_captions(
 
     Returns dict with keys: srt_path, ass_path, words (for music ducking).
     """
-    words = _whisper_word_timestamps(audio_path, lang)
-    if script:
-        words = align_words_to_script(words, script)
+    words = tts_word_timings(audio_path, script)
+    if not words:
+        words = _whisper_word_timestamps(audio_path, lang)
+        if script:
+            words = align_words_to_script(words, script)
 
     result = {"words": words}
 

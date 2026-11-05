@@ -206,6 +206,18 @@ def lead_silence_max() -> float:
         return 0.12
 
 
+def lead_trim_start(samples, sample_rate: int, keep_s: float = 0.12, threshold: float = 0.01) -> int:
+    """Samples trim_lead_silence() drops from the front (word timings shift by this)."""
+    import numpy as np
+    arr = np.asarray(samples)
+    if not len(arr):
+        return 0
+    loud = np.flatnonzero(np.abs(arr.astype("float32")) > threshold)
+    if not len(loud):
+        return 0
+    return max(0, int(loud[0]) - int(round(keep_s * sample_rate)))
+
+
 def trim_lead_silence(samples, sample_rate: int, keep_s: float = 0.12, threshold: float = 0.01):
     """Drop leading near-silence so at most `keep_s` remains before the first word
     (the hook's first word must land by 0.8 s). Returns the samples unchanged when
@@ -214,11 +226,8 @@ def trim_lead_silence(samples, sample_rate: int, keep_s: float = 0.12, threshold
     arr = np.asarray(samples)
     if not len(arr):
         return samples
-    loud = np.flatnonzero(np.abs(arr.astype("float32")) > threshold)
-    if not len(loud):
-        return samples
-    start = max(0, int(loud[0]) - int(round(keep_s * sample_rate)))
-    return arr[start:]
+    start = lead_trim_start(arr, sample_rate, keep_s, threshold)
+    return arr[start:] if start else samples
 
 
 def kokoro_model_dir() -> Path:
@@ -292,6 +301,219 @@ def ensure_kokoro_files(model_file: str = KOKORO_MODEL_FILE) -> tuple[Path, Path
     return paths[0], paths[1]
 
 
+# ── timestamped Kokoro: same voice, plus per-phoneme durations for exact word timings ──
+# onnx-community/Kokoro-82M-v1.0-ONNX-timestamped (Apache-2.0), onnx/model.onnx at a pinned
+# revision. Outputs waveform + durations, so captions and motion cues land on the spoken
+# word (+-80 ms) instead of Whisper base's estimate. The workflow downloads and verifies it;
+# without it (or when alignment fails) the plain model renders and Whisper times the words.
+KOKORO_TIMED_REPO = "onnx-community/Kokoro-82M-v1.0-ONNX-timestamped"
+KOKORO_TIMED_REVISION = "dd4401a9add81ac692d20e240d22ec9dda82cc29"
+KOKORO_TIMED_FILE = "kokoro-v1.0-timestamped.onnx"
+KOKORO_TIMED_URL = (f"https://huggingface.co/{KOKORO_TIMED_REPO}/resolve/{KOKORO_TIMED_REVISION}"
+                    "/onnx/model.onnx")
+KOKORO_TIMED_SIZE = 325_532_171
+KOKORO_SHA256[KOKORO_TIMED_FILE] = "651ea8291843a92276a4a003581a215cb07d15e47dde6fcfb1b768f9a1682054"
+WORD_TIMINGS_FILE = "voiceover_words.json"
+ALIGN_MIN_MATCHED = 0.8   # share of script words that must find their phonemes, else Whisper
+
+
+def kokoro_timed_model_path() -> Path:
+    """$KOKORO_TIMED_MODEL (a file path), else <model dir>/kokoro-v1.0-timestamped.onnx."""
+    env = os.environ.get("KOKORO_TIMED_MODEL", "").strip()
+    return Path(env).expanduser() if env else kokoro_model_dir() / KOKORO_TIMED_FILE
+
+
+def ensure_kokoro_timed_model() -> Path | None:
+    """The verified timestamped model, or None (with a log line) when it is missing or bad.
+
+    Downloaded by the workflow; the code only downloads it itself when
+    KOKORO_TIMED_AUTO_DOWNLOAD=1, so a missing file never stalls a run on 325 MB."""
+    path = kokoro_timed_model_path()
+    if os.environ.get("KOKORO_TIMED", "1").strip() == "0":
+        return None
+    if not path.exists() or path.stat().st_size == 0:
+        if os.environ.get("KOKORO_TIMED_AUTO_DOWNLOAD", "0").strip() != "1":
+            log(f"Timestamped Kokoro model not found at {path}; word timings fall back to Whisper")
+            return None
+        try:
+            log(f"Downloading timestamped Kokoro model ({KOKORO_TIMED_REPO}@{KOKORO_TIMED_REVISION[:7]})...")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".part")
+            with requests.get(KOKORO_TIMED_URL, stream=True, timeout=(10, 300)) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+            tmp.replace(path)
+        except Exception as exc:  # noqa: BLE001 - the plain model + Whisper still work
+            log(f"Timestamped Kokoro model download failed ({exc}); word timings fall back to Whisper")
+            return None
+    if path.stat().st_size != KOKORO_TIMED_SIZE or _sha256_file(path) != KOKORO_SHA256[KOKORO_TIMED_FILE]:
+        log(f"Timestamped Kokoro model at {path} failed its size/SHA-256 check; "
+            "word timings fall back to Whisper")
+        return None
+    return path
+
+
+_PHONE_SKIP = set("ˈˌː.,!?;:—–-…\"'“”‘’()[]¡¿ \t\n")
+
+
+def _phone_chars(text: str) -> str:
+    """Phoneme string reduced to its sounds: stress, length, punctuation and spaces dropped."""
+    return "".join(c for c in str(text) if c not in _PHONE_SKIP)
+
+
+def map_phoneme_timings(script: str, timings, phonemize) -> list[dict] | None:
+    """Script words timed from per-phoneme timings, aligned by pronunciation.
+
+    `timings` is the model's phoneme stream ((phoneme, start, end) tuples or objects with
+    .phoneme/.start/.end); `phonemize(word)` gives one script word's phonemes. Each word's
+    own pronunciation is matched against the stream, so "2024" (spoken "two thousand
+    twenty four", four phoneme words) owns all of those phonemes rather than one
+    space-separated slot. Words the matcher misses are spread between their timed
+    neighbours. Returns [{"word", "start", "end"}] in script spelling, or None when fewer
+    than ALIGN_MIN_MATCHED of the words matched (the caller then falls back to Whisper)."""
+    import difflib
+    words = str(script or "").split()
+    stream, stress_at = [], None
+    for t in timings or []:
+        ph, st, en = (t.phoneme, t.start, t.end) if hasattr(t, "phoneme") else t
+        if ph and all(c in "ˈˌ" for c in ph):   # a stress mark is the onset of the sound it precedes
+            stress_at = float(st) if stress_at is None else stress_at
+            continue
+        sounds = _phone_chars(ph)
+        if not sounds:
+            if ph and ph != "ː":
+                stress_at = None
+            continue
+        for c in sounds:
+            stream.append((c, float(st) if stress_at is None else stress_at, float(en)))
+            stress_at = None
+    if not words or not stream:
+        return None
+    ref, owner = [], []
+    for i, w in enumerate(words):
+        try:
+            p = _phone_chars(phonemize(w))
+        except Exception:  # noqa: BLE001 - one odd token never sinks the alignment
+            p = ""
+        ref.extend(p)
+        owner.extend([i] * len(p))
+    if not ref:
+        return None
+    hit: dict[int, list[tuple[int, int]]] = {}   # word -> [(ref offset in word, stream index)]
+    first_ref = {}
+    for k, o in enumerate(owner):
+        first_ref.setdefault(o, k)
+    sm = difflib.SequenceMatcher(a=ref, b=[c for c, _, _ in stream], autojunk=False)
+    for blk in sm.get_matching_blocks():
+        for n in range(blk.size):
+            k, j = blk.a + n, blk.b + n
+            hit.setdefault(owner[k], []).append((k - first_ref[owner[k]], j))
+    if len(hit) < ALIGN_MIN_MATCHED * len(words):
+        return None
+    spans: list[tuple[float, float] | None] = [None] * len(words)
+    last_j = -1
+    for i in range(len(words)):
+        pairs = hit.get(i)
+        if not pairs:
+            continue
+        off, j0 = pairs[0]
+        j_start = max(last_j + 1, j0 - off, 0)     # unmatched leading phonemes still belong to the word
+        j_start = min(j_start, j0)
+        j_end = pairs[-1][1]
+        spans[i] = (stream[j_start][1], stream[j_end][2])
+        last_j = j_end
+    out, prev_start = [], 0.0
+    for i, w in enumerate(words):
+        if spans[i] is None:   # spread missed words over the gap between timed neighbours
+            a = i
+            while a > 0 and spans[a - 1] is None:
+                a -= 1
+            b = i
+            while b + 1 < len(words) and spans[b + 1] is None:
+                b += 1
+            lo = spans[a - 1][1] if a > 0 else 0.0
+            hi = spans[b + 1][0] if b + 1 < len(words) else max(lo, stream[-1][2])
+            step = max(0.0, hi - lo) / (b - a + 1)
+            spans[i] = (lo + (i - a) * step, lo + (i - a + 1) * step)
+        st, en = spans[i]
+        st = max(st, prev_start)
+        en = max(en, st + 0.02)
+        out.append({"word": w, "start": round(st, 3), "end": round(en, 3)})
+        prev_start = st
+    return out
+
+
+def write_word_timings(out_dir: Path, audio_name: str, words: list[dict], source: str) -> Path:
+    import json
+    path = Path(out_dir) / WORD_TIMINGS_FILE
+    path.write_text(json.dumps({"audio": audio_name, "source": source, "words": words}, indent=1),
+                    encoding="utf-8")
+    return path
+
+
+def load_word_timings(audio_path: Path) -> list[dict]:
+    """Word timings TTS wrote for exactly this audio file (timestamped Kokoro), else []."""
+    import json
+    path = Path(audio_path).parent / WORD_TIMINGS_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("audio") != Path(audio_path).name:
+        return []
+    words = [w for w in data.get("words") or [] if isinstance(w, dict)
+             and {"word", "start", "end"} <= set(w)]
+    return words
+
+
+def _clear_word_timings(out_dir: Path) -> None:
+    try:
+        (Path(out_dir) / WORD_TIMINGS_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def kokoro_create_timed(engine, script: str, voice_arg, speed: float, lang: str):
+    """(audio, rate, phoneme timings) rendered exactly like Kokoro.create() renders today.
+
+    kokoro-onnx's create_timed() also splices extra silence after every mark once timings
+    exist, and its splice point can sit after the next phoneme's start, which moved word
+    timings ~100 ms late on a local sample. The same batches without that splice give the
+    audio create() gives (pauses only at batch joins) with timings that stay on the audio."""
+    prepare = getattr(engine, "_prepare", None)
+    batches_fn = getattr(engine, "_create_batches", None)
+    if prepare is None or batches_fn is None:   # another kokoro-onnx layout: the public API
+        return engine.create_timed(script, voice=voice_arg, speed=speed, lang=lang)
+    voice, _, batches = prepare(script, voice_arg, speed, lang, False, 0.25, 0.1)
+    audio, spoken = batches_fn(batches, voice, speed, True)
+    try:
+        from kokoro_onnx.config import SAMPLE_RATE as rate
+    except ImportError:
+        rate = 24000
+    return audio, rate, spoken
+
+
+def _timed_engine(Kokoro, voices_path):
+    """A Kokoro engine on the timestamped model, or None (logged) when unusable."""
+    path = ensure_kokoro_timed_model()
+    if path is None:
+        return None
+    try:
+        engine = Kokoro(str(path), str(voices_path))
+        outs = [o.name for o in engine.sess.get_outputs()]
+        if len(outs) < 2:
+            log(f"Timestamped Kokoro model reports no durations ({outs}); word timings fall back to Whisper")
+            return None
+        # kokoro-onnx looks for an output named "duration"; this export calls it "durations"
+        engine.has_timings = True
+        return engine
+    except Exception as exc:  # noqa: BLE001 - the plain model still renders the voice
+        log(f"Timestamped Kokoro model failed to load ({exc}); word timings fall back to Whisper")
+        return None
+
+
 def _write_wav(samples, sample_rate: int, out_path: Path) -> None:
     """Write float samples [-1, 1] as 16-bit mono PCM WAV (stdlib only)."""
     import wave
@@ -318,9 +540,20 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
         kokoro_lang = "en-gb"
     model_path, voices_path = ensure_kokoro_files(cfg["model_file"])
     log(f"Generating {lang} voiceover via Kokoro-82M (voice: {cfg['voice']}, speed: {cfg['speed']})...")
-    engine = Kokoro(str(model_path), str(voices_path))
+    timed = _timed_engine(Kokoro, voices_path)
+    engine = timed or Kokoro(str(model_path), str(voices_path))
+    if timed is not None:
+        log("Kokoro: timestamped model (per-phoneme durations) renders the voice and times the words")
     voice_arg = kokoro_voice_arg(engine, cfg["voice"])
-    samples, sample_rate = engine.create(script, voice=voice_arg, speed=cfg["speed"], lang=kokoro_lang)
+    state = {"timings": []}
+
+    def render(speed):
+        if timed is not None:
+            audio, rate, state["timings"] = kokoro_create_timed(timed, script, voice_arg, speed, kokoro_lang)
+            return audio, rate
+        return engine.create(script, voice=voice_arg, speed=speed, lang=kokoro_lang)
+
+    samples, sample_rate = render(cfg["speed"])
     # Keep the voiceover inside the 45-75 s window when a small speed change can
     # do it (one re-render at most, speed stays within 0.95-1.2).
     n_words = max(1, len(str(script).split()))
@@ -332,7 +565,7 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
             log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM outside {lo_wpm:.0f}-{hi_wpm:.0f}; "
                 f"re-rendering at speed {paced}")
             first = (cfg["speed"], n_words / seconds * 60.0)
-            samples, sample_rate = engine.create(script, voice=voice_arg, speed=paced, lang=kokoro_lang)
+            samples, sample_rate = render(paced)
             cfg["speed"] = paced
             seconds = len(samples) / float(sample_rate)
             # Kokoro's pace is not linear in speed (draft job-mw0rja3o: 117 WPM at 1.08 -> 170 WPM at
@@ -341,7 +574,7 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
             if again is not None:
                 log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM at speed {paced} still outside "
                     f"{lo_wpm:.0f}-{hi_wpm:.0f}; re-rendering at speed {again}")
-                samples, sample_rate = engine.create(script, voice=voice_arg, speed=again, lang=kokoro_lang)
+                samples, sample_rate = render(again)
                 cfg["speed"] = again
                 seconds = len(samples) / float(sample_rate)
         pad = short_padding_seconds(seconds)
@@ -363,11 +596,14 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
                 new_speed = None
         if new_speed is not None:
             log(f"Kokoro voiceover {seconds:.1f}s outside {VO_MIN_SECONDS}-{VO_MAX_SECONDS}s; re-rendering at speed {new_speed}")
-            samples, sample_rate = engine.create(script, voice=voice_arg, speed=new_speed, lang=kokoro_lang)
+            samples, sample_rate = render(new_speed)
             cfg["speed"] = new_speed
     if samples is None or len(samples) < int(sample_rate) * 0.5:
         raise RuntimeError("Kokoro produced no usable audio")
-    samples = trim_lead_silence(samples, sample_rate, lead_silence_max())
+    lead = lead_trim_start(samples, sample_rate, lead_silence_max())
+    if lead:
+        import numpy as np
+        samples = np.asarray(samples)[lead:]
     # Sanity check: spoken duration must roughly match the text length
     # (~1.2-4.5 words per second). Catches silent / truncated renders.
     words = max(1, len(str(script).split()))
@@ -377,7 +613,30 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
         raise RuntimeError(f"Kokoro audio duration implausible ({seconds:.1f}s for {words} words)")
     out_path = out_dir / f"voiceover_{lang}.wav"
     _write_wav(samples, sample_rate, out_path)
-    _write_voice_meta(out_dir, "kokoro", cfg["voice"], cfg["speed"], cfg["model_file"])
+    if timed is not None:
+        word_timings = None
+        try:
+            cache: dict[str, str] = {}
+
+            def phon(w):
+                if w not in cache:
+                    cache[w] = engine.tokenizer.phonemize(w, kokoro_lang)
+                return cache[w]
+            shift = lead / float(sample_rate)
+            shifted = []
+            for t in state["timings"]:
+                ph, st, en = (t.phoneme, t.start, t.end) if hasattr(t, "phoneme") else t
+                shifted.append((ph, float(st) - shift, float(en) - shift))
+            word_timings = map_phoneme_timings(script, shifted, phon)
+        except Exception as exc:  # noqa: BLE001 - Whisper still times the words
+            log(f"Kokoro phoneme alignment error: {exc}")
+        if word_timings:
+            write_word_timings(out_dir, out_path.name, word_timings, "kokoro-timestamped")
+            log(f"Kokoro word timings: {len(word_timings)} words from phoneme durations (Whisper not needed)")
+        else:
+            log("Kokoro phoneme-to-word alignment failed; captions fall back to Whisper word timings")
+    _write_voice_meta(out_dir, "kokoro", cfg["voice"], cfg["speed"],
+                      KOKORO_TIMED_FILE if timed is not None else cfg["model_file"])
     log(f"Kokoro voiceover saved: {out_path.name} ({seconds:.1f}s, {wps:.2f} words/s, {wps * 60:.0f} WPM, "
         f"speed {cfg['speed']})")
     return out_path
@@ -756,6 +1015,7 @@ def generate_voiceover(
     """
     provider = get_tts_provider(provider)
     voice_config = voice_config or {}
+    _clear_word_timings(out_dir)  # word timings only ever describe the audio written by this call
 
     if provider == "kokoro":
         if lang[:2] in KOKORO_LANGS:

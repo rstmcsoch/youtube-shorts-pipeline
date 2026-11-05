@@ -11,7 +11,7 @@ from .broll import animate_frame, render_clip_shot, max_uses_for, THIRD_PARTY_PR
 from .config import MEDIA_DIR, run_cmd
 from .log import log
 from .backdrop import Backdrop
-from .motion import MOTION_KINDS, code_typing_window, key_words, motion_cards, render_block
+from .motion import MOTION_KINDS, code_typing_window, cue_data, key_words, motion_cards, render_block, spec_data
 from .motion import _window as narration_window
 from .style import STYLE_DIR
 
@@ -529,7 +529,7 @@ def assemble_video(
         parts, t_bg = [], 0.0
         for j, spec in enumerate(motion_cards(kind, data, cuts, starts[i], words)):
             part = out_dir / f"anim_{i}_{j}.mp4"
-            render_block(spec["kind"], spec["data"], part, spec["duration"], backdrop=bd, bg_t0=t_bg)
+            render_block(spec["kind"], spec_data(spec), part, spec["duration"], backdrop=bd, bg_t0=t_bg)
             parts.append(part)
             t_bg += spec["duration"]
         _concat_copy(parts, anim)
@@ -561,12 +561,13 @@ def assemble_video(
                     t_bg = 0.0
                     for j, spec in enumerate(motion_cards(src["block"], src["data"], cuts, starts[i], words)):
                         part = out_dir / f"anim_{i}_{j}.mp4"
-                        render_block(spec["kind"], spec["data"], part, spec["duration"], backdrop=bd, bg_t0=t_bg)
+                        render_block(spec["kind"], spec_data(spec), part, spec["duration"], backdrop=bd, bg_t0=t_bg)
                         parts.append(part)
                         t_bg += spec["duration"]
                     _concat_copy(parts, anim)
                     return anim
-                render_block(src["block"], src["data"], whole, shot["duration"], backdrop=bd)
+                cued = cue_data(src["block"], src["data"], words, starts[i], starts[i] + shot["duration"])
+                render_block(src["block"], cued, whole, shot["duration"], backdrop=bd)
                 if len(cuts) > 1:
                     _recut(whole, anim, cuts, MOTION_PUNCH if bd is not None else PULL_BACK)
             except Exception as exc:  # never lose the video over one motion block
