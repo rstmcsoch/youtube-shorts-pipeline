@@ -1,0 +1,26 @@
+{
+  "job_id": "job-mw3jze6w-qlhqs5",
+  "producing_run_id": "42031882182",
+  "artifact_name": "draft-job-mw3jze6w-qlhqs5",
+  "draft_file": "1793883672.json",
+  "language": "en",
+  "title": "How AI Actually Recommends Your Next Song",
+  "topic": "How AI recommends your next song",
+  "review_required": true,
+  "needs_fixes": false,
+  "quality": {
+    "verdict": "ok",
+    "hard_failures": [],
+    "script_model": "gemini-3.8-flash",
+    "topic_check": "borderline"
+  },
+  "visual_manifest": "/home/runner/work/youtube-shorts-pipeline/youtube-shorts-pipeline/.verticals-runtime/media/work_1793883672_en/broll_manifest.json",
+  "contains_synthetic_media": true,
+  "image_providers": [
+    "cloudflare_workers_ai",
+    "gradient",
+    "pixabay"
+  ],
+  "voice": "am_michael",
+  "design_pattern": "elements"
+}
