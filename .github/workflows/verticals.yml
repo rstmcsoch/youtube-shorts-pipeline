@@ -32,11 +32,10 @@ on:
         type: choice
         options: [en, hi, es, pt, de, fr, ja, ko]
       privacy:
-        description: 'YouTube visibility; private is recommended for first tests'
-        required: true
-        default: 'private'
-        type: choice
-        options: [private, unlisted, public]
+        description: 'Legacy YouTube visibility (private | unlisted | public); privacy_status wins'
+        required: false
+        default: ''
+        type: string
       job_id:
         description: 'DYPOL job ID connecting draft and publish'
         required: false
@@ -67,6 +66,21 @@ on:
         default: '0'
       reviewer_feedback:
         description: 'Reviewer notes from a rejected attempt (redo); max 1500 chars are used'
+        required: false
+        default: ''
+        type: string
+      voice:
+        description: 'Kokoro voice id or blend "am_michael:0.6,am_adam:0.4"; blank = repo default'
+        required: false
+        default: ''
+        type: string
+      design_pattern:
+        description: 'Design pattern id (elements; characters is coming soon); blank = repo default'
+        required: false
+        default: ''
+        type: string
+      privacy_status:
+        description: 'YouTube visibility: private | unlisted | public (blank = unlisted)'
         required: false
         default: ''
         type: string
@@ -104,7 +118,9 @@ jobs:
       CONTEXT: ${{ inputs.context || '' }}
       LANGUAGE: ${{ inputs.language || 'en' }}
       KOKORO_MODEL_DIR: ${{ github.workspace }}/.kokoro-cache
-      KOKORO_VOICE: ${{ vars.KOKORO_VOICE || 'af_heart' }}
+      # Console contract: input -> repo variable -> brand default. Invalid voices log and use am_michael.
+      DYPOL_VOICE: ${{ inputs.voice || vars.DYPOL_DEFAULT_VOICE || 'am_michael' }}
+      DYPOL_PATTERN: ${{ inputs.design_pattern || vars.DYPOL_DEFAULT_PATTERN || 'elements' }}
       KOKORO_SPEED: ${{ vars.KOKORO_SPEED || '1.08' }}
       # Quiet Open Lo-Fi (CC0) music under the voice; set repo variable to 0 to turn off.
       MUSIC_ENABLED: ${{ vars.MUSIC_ENABLED || '1' }}
@@ -276,6 +292,8 @@ jobs:
               # status.containsSyntheticMedia the publish step will send + who made the stills.
               "contains_synthetic_media": bool(draft.get("contains_synthetic_media", False)),
               "image_providers": draft.get("image_providers", []),
+              "voice": draft.get("voice", ""),
+              "design_pattern": draft.get("design_pattern", "elements"),
           }
           with open(f"dypol-drafts/{job_id}.json", "w", encoding="utf-8") as f:
               json.dump(snapshot, f, indent=2)
@@ -369,7 +387,7 @@ jobs:
       PHASE: ${{ inputs.phase || 'draft' }}
       REQUESTED_DRAFT_RUN_ID: ${{ inputs.draft_run_id || '' }}
       REQUESTED_JOB_ID: ${{ inputs.job_id || '' }}
-      PRIVACY: ${{ inputs.privacy || 'private' }}
+      PRIVACY: ${{ inputs.privacy_status || inputs.privacy || 'unlisted' }}
       LANGUAGE: ${{ inputs.language || 'en' }}
       TITLE_OVERRIDE: ${{ inputs.title_override || '' }}
       DESCRIPTION_OVERRIDE: ${{ inputs.description_override || '' }}
@@ -519,7 +537,7 @@ jobs:
 
       - name: Upload the reviewed video to YouTube
         env:
-          YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy || 'private' }}
+          YOUTUBE_PRIVACY_STATUS: ${{ inputs.privacy_status || inputs.privacy || 'unlisted' }}
         run: |
           set -euo pipefail
           python -m verticals upload --draft "$DRAFT" --lang "$LANGUAGE" 2>&1 | tee -a "$RUNNER_TEMP/dypol-publish.log"

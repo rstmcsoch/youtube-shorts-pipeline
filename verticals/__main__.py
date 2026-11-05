@@ -60,6 +60,11 @@ def cmd_draft(args):
         print(f"\n  ERROR: {exc}")
         sys.exit(4)
     draft["job_id"] = job_id
+    # Console contract (5 Nov 2026): the voice and design pattern this draft is rendered with.
+    from .design_patterns import resolve_design_pattern
+    from .tts import kokoro_settings
+    draft["voice"] = kokoro_settings()["voice"]
+    draft["design_pattern"] = resolve_design_pattern()
 
     out_path = DRAFTS_DIR / f"{job_id}.json"
     state = PipelineState(draft)

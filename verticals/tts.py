@@ -49,6 +49,69 @@ KOKORO_DEFAULT_SPEED = 1.08
 # Kokoro is only used for languages whose voice matches the brand voice.
 KOKORO_LANGS = {"en": "en-us"}
 
+# Every voice in the official kokoro-onnx voices-v1.0.bin (Kokoro-82M v1.0).
+KOKORO_VOICES = frozenset("""
+af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky
+am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa
+bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis
+ef_dora em_alex em_santa ff_siwis hf_alpha hf_beta hm_omega hm_psi if_sara im_nicola
+jf_alpha jf_gongitsune jf_nezumi jf_tebukuro jm_kumo pf_dora pm_alex pm_santa
+zf_xiaobei zf_xiaoni zf_xiaoxiao zf_xiaoyi zm_yunjian zm_yunxi zm_yunxia zm_yunyang
+""".split())
+KOKORO_MAX_BLEND = 4
+
+
+def parse_kokoro_voice(value: str):
+    """Parse a Kokoro voice id ("am_michael") or blend ("am_michael:0.6,am_adam:0.4").
+
+    Returns a list of (voice_id, weight) with weights normalised to sum 1, or None when
+    the value is not a valid Kokoro voice/blend (unknown id, bad/non-positive weight,
+    duplicate id, or more than KOKORO_MAX_BLEND parts)."""
+    text = str(value or "").strip().lower().replace(" ", "")
+    if not text:
+        return None
+    if ":" not in text and "," not in text:
+        return [(text, 1.0)] if text in KOKORO_VOICES else None
+    parts = []
+    for chunk in text.split(","):
+        vid, sep, raw_w = chunk.partition(":")
+        if not sep or vid not in KOKORO_VOICES or any(v == vid for v, _ in parts):
+            return None
+        try:
+            w = float(raw_w)
+        except ValueError:
+            return None
+        if not (0 < w <= 1e3) or w != w:
+            return None
+        parts.append((vid, w))
+    if not parts or len(parts) > KOKORO_MAX_BLEND:
+        return None
+    total = sum(w for _, w in parts)
+    return [(v, round(w / total, 4)) for v, w in parts]
+
+
+def validate_kokoro_voice(value: str) -> str:
+    """Canonical voice string for `value`, or the brand voice (am_michael) with a log line."""
+    parsed = parse_kokoro_voice(value)
+    if parsed is None:
+        log(f"DYPOL voice {str(value or '')[:80]!r} is not a valid Kokoro voice or blend; "
+            f"falling back to {KOKORO_DEFAULT_VOICE}")
+        return KOKORO_DEFAULT_VOICE
+    if len(parsed) == 1:
+        return parsed[0][0]
+    return ",".join(f"{v}:{w:g}" for v, w in parsed)
+
+
+def kokoro_voice_arg(engine, voice: str):
+    """What kokoro-onnx `create(voice=...)` takes: the id itself, or a weighted style
+    array for a blend (sum of get_voice_style(id) * weight)."""
+    parsed = parse_kokoro_voice(voice) or [(KOKORO_DEFAULT_VOICE, 1.0)]
+    if len(parsed) == 1:
+        return parsed[0][0]
+    import numpy as np
+    getter = getattr(engine, "get_voice_style", None) or (lambda name: engine.voices[name])
+    return np.sum([np.asarray(getter(v)) * w for v, w in parsed], axis=0)
+
 
 VO_MIN_SECONDS = 45.0
 VO_MAX_SECONDS = 75.0
@@ -174,10 +237,11 @@ def _style_voice() -> dict:
 def kokoro_settings() -> dict:
     """Resolve the Kokoro voice/speed, clamped to a sane range.
 
-    Order: $DYPOL_VOICE / $DYPOL_VOICE_SPEED, then the style guide's `voice:` block (the
+    Order: $DYPOL_VOICE / $DYPOL_VOICE_SPEED (workflow: input voice -> repo variable
+    DYPOL_DEFAULT_VOICE -> am_michael), then the style guide's `voice:` block (the
     brand voice, am_michael at 1.08 since 3 Nov 2026), then the legacy $KOKORO_VOICE /
-    $KOKORO_SPEED (the workflow always sets these, defaulting to af_heart), then the
-    module defaults."""
+    $KOKORO_SPEED, then the module defaults. The voice may be a Kokoro id or a blend
+    "a:0.6,b:0.4"; anything invalid logs a line and falls back to am_michael."""
     style = _style_voice()
     voice = (os.environ.get("DYPOL_VOICE", "") or str(style.get("kokoro_voice") or "")
              or os.environ.get("KOKORO_VOICE", "") or KOKORO_DEFAULT_VOICE).strip()
@@ -188,6 +252,7 @@ def kokoro_settings() -> dict:
     except ValueError:
         speed = KOKORO_DEFAULT_SPEED
     speed = min(1.3, max(0.8, speed))
+    voice = validate_kokoro_voice(voice)
     model = (os.environ.get("KOKORO_MODEL_FILE", "") or KOKORO_MODEL_FILE).strip()
     return {"voice": voice, "speed": speed, "model_file": model}
 
@@ -254,7 +319,8 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
     model_path, voices_path = ensure_kokoro_files(cfg["model_file"])
     log(f"Generating {lang} voiceover via Kokoro-82M (voice: {cfg['voice']}, speed: {cfg['speed']})...")
     engine = Kokoro(str(model_path), str(voices_path))
-    samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=cfg["speed"], lang=kokoro_lang)
+    voice_arg = kokoro_voice_arg(engine, cfg["voice"])
+    samples, sample_rate = engine.create(script, voice=voice_arg, speed=cfg["speed"], lang=kokoro_lang)
     # Keep the voiceover inside the 45-75 s window when a small speed change can
     # do it (one re-render at most, speed stays within 0.95-1.2).
     n_words = max(1, len(str(script).split()))
@@ -266,7 +332,7 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
             log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM outside {lo_wpm:.0f}-{hi_wpm:.0f}; "
                 f"re-rendering at speed {paced}")
             first = (cfg["speed"], n_words / seconds * 60.0)
-            samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=paced, lang=kokoro_lang)
+            samples, sample_rate = engine.create(script, voice=voice_arg, speed=paced, lang=kokoro_lang)
             cfg["speed"] = paced
             seconds = len(samples) / float(sample_rate)
             # Kokoro's pace is not linear in speed (draft job-mw0rja3o: 117 WPM at 1.08 -> 170 WPM at
@@ -275,7 +341,7 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
             if again is not None:
                 log(f"Kokoro pace {n_words / seconds * 60:.0f} WPM at speed {paced} still outside "
                     f"{lo_wpm:.0f}-{hi_wpm:.0f}; re-rendering at speed {again}")
-                samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=again, lang=kokoro_lang)
+                samples, sample_rate = engine.create(script, voice=voice_arg, speed=again, lang=kokoro_lang)
                 cfg["speed"] = again
                 seconds = len(samples) / float(sample_rate)
         pad = short_padding_seconds(seconds)
@@ -297,7 +363,7 @@ def _generate_kokoro(script: str, out_dir: Path, lang: str) -> Path:
                 new_speed = None
         if new_speed is not None:
             log(f"Kokoro voiceover {seconds:.1f}s outside {VO_MIN_SECONDS}-{VO_MAX_SECONDS}s; re-rendering at speed {new_speed}")
-            samples, sample_rate = engine.create(script, voice=cfg["voice"], speed=new_speed, lang=kokoro_lang)
+            samples, sample_rate = engine.create(script, voice=voice_arg, speed=new_speed, lang=kokoro_lang)
             cfg["speed"] = new_speed
     if samples is None or len(samples) < int(sample_rate) * 0.5:
         raise RuntimeError("Kokoro produced no usable audio")
