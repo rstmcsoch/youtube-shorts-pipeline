@@ -283,14 +283,26 @@ def shot_capacity(sources: list[dict]) -> int:
 # Audio: optional music bed (sidechain ducked) + loudnorm -14 LUFS
 # ─────────────────────────────────────────────────────
 
-def music_filter_graph(duration: float, music_gain_db: float = -22.0, sfx: bool = False) -> str:
-    """Voice [1:a] + music [2:a] (+ SFX bed [3:a]); music is ducked under the voice with sidechaincompress.
+# Sidechain duck for the SFX bed: deeper and faster than the music duck, so soft
+# transitions sit in the pauses and dip well under any word they overlap.
+SFX_DUCK = "sidechaincompress=threshold=0.02:ratio=8:attack=5:release=250:makeup=1"
 
-    The SFX bed is already set ~12 dB under the voice peak (verticals/sfx.py) and is
-    mixed beside the ducked music, so effects never pump the music.
+
+def music_filter_graph(duration: float, music_gain_db: float = -22.0, sfx: bool = False) -> str:
+    """Voice [1:a] + music [2:a] (+ SFX bed [3:a]); music and SFX are ducked under the voice.
+
+    The SFX bed is already set ~20 dB under the voice peak (verticals/sfx.py); it is
+    sidechain-ducked under speech on its own path and mixed beside the ducked music.
     """
     if sfx:
-        return (music_filter_graph(duration, music_gain_db).replace("[voice][ducked]amix=inputs=2", "[voice][ducked][3:a]amix=inputs=3"))
+        return (
+            f"[2:a]atrim=0:{duration:.3f},asetpts=N/SR/TB,volume={music_gain_db}dB,"
+            f"afade=t=in:d=1.5,afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5[bed];"
+            f"[1:a]asplit=3[voice][sc][sc2];"
+            f"[bed][sc]sidechaincompress=threshold=0.05:ratio=2:attack=20:release=350[ducked];"
+            f"[3:a][sc2]{SFX_DUCK}[fxd];"
+            f"[voice][ducked][fxd]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[mix]"
+        )
     return (
         f"[2:a]atrim=0:{duration:.3f},asetpts=N/SR/TB,volume={music_gain_db}dB,"
         f"afade=t=in:d=1.5,afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5[bed];"
@@ -299,6 +311,12 @@ def music_filter_graph(duration: float, music_gain_db: float = -22.0, sfx: bool 
         f"[bed][sc]sidechaincompress=threshold=0.05:ratio=2:attack=20:release=350[ducked];"
         f"[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
     )
+
+
+def sfx_only_filter_graph() -> str:
+    """Voice [0:a] + SFX bed [1:a], SFX sidechain-ducked under speech (no music)."""
+    return (f"[0:a]asplit=2[voice][sc];[1:a][sc]{SFX_DUCK}[fxd];"
+            f"[voice][fxd]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]")
 
 
 def loudnorm_filter(measured: dict | None = None) -> str:
@@ -340,7 +358,7 @@ def prepare_audio(voiceover: Path, out_dir: Path, duration: float,
                        "-map", "[mix]", "-t", f"{duration:.3f}", "-ar", "48000", "-ac", "2", str(mix)])
     elif has_sfx:
         run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(voiceover), "-i", str(sfx_path), "-filter_complex",
-                 "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]",
+                 sfx_only_filter_graph(),
                  "-map", "[mix]", "-t", f"{duration:.3f}", "-ar", "48000", "-ac", "2", str(mix)])
     else:
         run_cmd(["ffmpeg", "-y", "-loglevel", "error", "-i", str(voiceover), "-t", f"{duration:.3f}",
@@ -564,7 +582,7 @@ def assemble_video(
             _still_shot(i, lambda j: src["path"], shot, anim)
         return anim
 
-    # SFX bed (whoosh/pop on beat changes, impact on the hook, clicks on typing).
+    # SFX bed (soft whoosh/chime on beat changes, chime on the hook, swell into the count-up).
     sfx_path = None
     if _flag("DYPOL_SFX_ENABLED"):
         try:

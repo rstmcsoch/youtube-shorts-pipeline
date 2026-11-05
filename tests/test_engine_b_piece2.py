@@ -11,7 +11,8 @@ import pytest
 
 from verticals import assemble, pacing, qc, sfx
 from verticals.captions import (
-    DYPOL_CAPTION, dypol_caption_chunks, generate_dypol_ass, use_dypol_captions,
+    DYPOL_CAPTION, SHORTS_BOTTOM_UI_FRAC, caption_block_bottom, dypol_caption_chunks, fit_caption_chunks,
+    generate_dypol_ass, use_dypol_captions,
 )
 from verticals.motion import code_typing_window
 
@@ -140,24 +141,23 @@ class TestDypolCaptions:
         chunks = dypol_caption_chunks(_words("That is the new normal."))
         assert [len(c) for c in chunks] == [3, 2]
 
-    def test_ass_style_and_karaoke(self, tmp_path):
+    def test_ass_style_and_key_word_highlight(self, tmp_path):
         out = generate_dypol_ass(_words(SCRIPT), tmp_path / "c.ass")
         text = out.read_text()
         style = [l for l in text.splitlines() if l.startswith("Style: Dypol")][0].split(",")
         assert style[1] == "Space Grotesk" and style[7] == "-1"
         assert style[15] == "1" and int(style[16]) >= 5 and int(style[17]) >= 3   # stroke + shadow
-        assert "\\c&H60F5C8&" in text                                             # lime active word
-        y = round(1920 * 0.63)
+        y = round(1920 * 0.75)
         assert f"\\an5\\pos({DYPOL_CAPTION['center_x']},{y})" in text
         n_words = len(_words(SCRIPT))
-        assert text.count("Dialogue:") == n_words
-        assert text.count("\\c&H60F5C8&") == n_words
+        n_lime = text.count("\\c&H60F5C8&")
+        assert 1 <= n_lime < n_words / 2                       # key words only, not every word
+        assert text.count("Dialogue:") == len(fit_caption_chunks(dypol_caption_chunks(_words(SCRIPT))))
 
     def test_position_clear_of_shorts_ui(self):
         cx, w = DYPOL_CAPTION["center_x"], DYPOL_CAPTION["max_width"]
         assert cx - w / 2 >= 72 and cx + w / 2 <= 1080 * 0.86
-        line_h = DYPOL_CAPTION["size"]
-        assert 1920 * DYPOL_CAPTION["center_y_frac"] + line_h <= 1920 * 0.78
+        assert caption_block_bottom(1920) <= 1920 * (1 - SHORTS_BOTTOM_UI_FRAC)
 
     def test_long_chunk_is_set_smaller(self, tmp_path):
         words = _words("Internationalization standardization interoperability.")
@@ -180,39 +180,35 @@ class TestDypolCaptions:
 # ───────────────────────── SFX ─────────────────────────
 
 class TestSfx:
-    def test_manifest_and_licences(self):
+    def test_manifest_is_procedural(self):
         m = sfx.load_manifest()
         clips = m["clips"]
-        assert 10 <= len(clips) <= 15 and m["license"] == "CC0-1.0"
-        cats = {c["category"] for c in clips}
-        assert {"whoosh", "pop", "impact", "click", "riser"} <= cats
-        lic = (REPO / "sfx" / "LICENSES.md").read_text()
-        assert "CC0" in lic
+        assert 4 <= len(clips) <= 10 and "procedural" in m["license"]
+        assert {c["category"] for c in clips} == {"whoosh", "chime", "swell"}
         for c in clips:
-            assert (REPO / "sfx" / c["file"]).exists()
-            assert c["file"] in lic
-            assert c["source"]["url"].startswith("https://kenney.nl/assets/")
+            x = sfx.synth_clip(c)
+            assert len(x) == int(round(c["duration_s"] * sfx.SR)) and abs(float(abs(x).max()) - 1.0) < 1e-3
 
     def test_plan_rates_variety_and_hook(self):
         duration = 60.0
         beats = [round(4.0 * k, 2) for k in range(1, 15)]
         ev = sfx.plan_sfx(duration, beats, sub_cuts=[b + 2.0 for b in beats], hook_t=0.1)
-        assert ev[0]["kind"] == "hook" and ev[0]["clip"].startswith("impact")
+        assert ev[0]["kind"] == "hook" and ev[0]["clip"].startswith("chime")
         rate = sfx.transitions_per_minute(ev, duration)
         assert 6 <= rate <= 12
         trans = [e for e in ev if e["kind"] == "transition"]
         assert all(a["clip"] != b["clip"] for a, b in zip(trans, trans[1:]))
-        assert {e["clip"].split("_")[0] for e in trans} == {"whoosh", "pop"}
+        assert {e["clip"].split("_")[0] for e in trans} == {"whoosh", "chime"}
 
     def test_floor_uses_subcuts_when_few_beats(self):
         ev = sfx.plan_sfx(60.0, [30.0], sub_cuts=[float(t) for t in range(3, 60, 3)])
         assert sfx.transitions_per_minute(ev, 60.0) >= 6
 
-    def test_clicks_inside_typing_window_and_riser_lands(self):
+    def test_typing_is_silent_and_swell_lands(self):
         ev = sfx.plan_sfx(20.0, [5.0, 10.0, 15.0], typing=[(10.3, 12.0)], riser_at=10.0)
-        clicks = [e for e in ev if e["kind"] == "typing"]
-        assert clicks and all(10.3 <= e["t"] < 12.0 for e in clicks)
+        assert not [e for e in ev if e["kind"] == "typing"]
         riser = [e for e in ev if e["kind"] == "riser"][0]
+        assert riser["clip"].startswith("swell")
         dur = next(c for c in sfx.load_manifest()["clips"] if c["id"] == riser["clip"])["duration_s"]
         assert abs(riser["t"] + dur - 10.0) < 0.01
 
@@ -234,7 +230,7 @@ class TestSfx:
             x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2") / 32767
         v = sfx._decode(voice)
         diff = 20 * np.log10(np.abs(v).max()) - 20 * np.log10(np.abs(x).max())
-        assert 11.0 <= diff <= 13.0
+        assert 19.0 <= diff <= 21.0
         assert len(x) == 4 * 48000
 
     def test_empty_plan_renders_nothing(self, tmp_path):
@@ -259,7 +255,7 @@ class TestSfx:
 class TestMix:
     def test_music_graph_with_sfx(self):
         g = assemble.music_filter_graph(60.0, -26, sfx=True)
-        assert "[voice][ducked][3:a]amix=inputs=3" in g and "sidechaincompress" in g
+        assert "[voice][ducked][fxd]amix=inputs=3" in g and "[3:a][sc2]sidechaincompress" in g
         assert "[3:a]" not in assemble.music_filter_graph(60.0, -26)
 
     def test_prepare_audio_adds_sfx_input(self, monkeypatch, tmp_path):
@@ -273,7 +269,7 @@ class TestMix:
         assert any("loudnorm=I=-14" in " ".join(c) for c in cmds[1:])
         cmds.clear()
         assemble.prepare_audio(tmp_path / "v.wav", tmp_path, 30.0, None, -26, sfx_path=str(fx))
-        assert "[0:a][1:a]amix=inputs=2" in " ".join(cmds[0])
+        assert "[1:a][sc]sidechaincompress" in " ".join(cmds[0]) and "[voice][fxd]amix=inputs=2" in " ".join(cmds[0])
 
 
 # ───────────────────────── grade + QC ─────────────────────────

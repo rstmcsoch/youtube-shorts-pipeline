@@ -264,11 +264,98 @@ DYPOL_CAPTION = {
     "size": 112,              # libass size (line height); glyph em is ~size / 1.28
     "min_size": 76,
     "center_x": 500,          # centre of the safe band x 72-929 (right 14% is Shorts UI)
-    "center_y_frac": 0.63,    # ~63% of screen height
+    "center_y_frac": 0.75,    # 75% of height; block bottom ~78.5%, above the bottom-20% Shorts UI
     "max_width": 790,         # px at PlayRes, incl. outline; band is 857 px wide
     "outline": 7,
     "shadow": 4,
 }
+SHORTS_BOTTOM_UI_FRAC = 0.20   # bottom ~20% of a 1920 px Short is covered by the title/channel UI
+
+
+def caption_block_bottom(video_height: int = 1920, cfg: dict | None = None) -> float:
+    """Lowest pixel the caption line can reach (centre + half line + outline + shadow)."""
+    cfg = cfg or DYPOL_CAPTION
+    return video_height * cfg["center_y_frac"] + cfg["size"] / 2 + cfg["outline"] + cfg["shadow"]
+
+
+# ── key-word highlighting: numbers always, plus at most one key term per sentence ──
+_STOPWORDS = set("""
+a about above after again against all almost also although always am among an and another any anyone anything are
+around as at away back be became because become been before being below between both but by can cannot could did do
+does doing done down during each either else enough even ever every everyone everything few for from further get gets
+getting give given go goes going gone got had has have having he her here hers herself him himself his how however i
+if in into is it its itself just keep know known last least less let like likely made make makes making many may maybe
+me might more most much must my myself need needs never new next no nobody none nor not nothing now of off often on
+once one only onto or other others our ours ourselves out over own part people per perhaps put quite rather really
+right said same say says see seem seems several shall she should show shows since so some someone something sometimes
+still such take takes than that the their theirs them themselves then there these they thing things think this those
+though through thus to today together too toward towards under until up upon us use used uses using very want was way
+ways we well were what whatever when where whether which while who whole whom whose why will with within without would
+yet you your yours yourself yourselves actually basically literally simply already instead every here's that's it's
+there's what's don't doesn't didn't can't won't isn't aren't wasn't you're they're we're i'm let's
+""".split())
+_NUMBER_WORDS = {"percent", "percentage", "%", "hundred", "thousand", "million", "billion", "trillion"}
+
+
+def _bare(word: str) -> str:
+    import re
+    return re.sub(r"^[^\w%$€£]+|[^\w%]+$", "", str(word)).lower()
+
+
+def _is_number_token(word: str) -> bool:
+    import re
+    return bool(re.search(r"\d", str(word)))
+
+
+def _sentences(words: list[dict]) -> list[list[int]]:
+    out, cur = [], []
+    for i, w in enumerate(words):
+        cur.append(i)
+        last = str(w["word"]).rstrip().rstrip("\"')\u201d\u2019")[-1:]
+        if last and last in ".!?":
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out
+
+
+def select_key_words(words: list[dict], keywords: list[str] | None = None) -> set[int]:
+    """Indices of words to highlight.
+
+    Every number / percentage / year (any token with a digit, plus a following
+    "percent"/"million"-type unit) is highlighted. On top of that each sentence gets
+    at most ONE key term: the longest word matching the script's keywords if given,
+    else the longest content word (>= 4 letters, not a stopword).
+    """
+    kw = set()
+    for k in keywords or []:
+        for part in str(k).split():
+            b = _bare(part)
+            if len(b) >= 3 and b not in _STOPWORDS:
+                kw.add(b)
+    picked: set[int] = set()
+    for sent in _sentences(words):
+        for pos, i in enumerate(sent):
+            if _is_number_token(words[i]["word"]):
+                picked.add(i)
+                if pos + 1 < len(sent) and _bare(words[sent[pos + 1]]["word"]) in _NUMBER_WORDS:
+                    picked.add(sent[pos + 1])
+        cands = [i for i in sent if i not in picked and not _is_number_token(words[i]["word"])
+                 and _bare(words[i]["word"]) not in _NUMBER_WORDS]
+        best = None
+        if kw:
+            hits = [i for i in cands if _bare(words[i]["word"]) in kw]
+            if hits:
+                best = max(hits, key=lambda i: (len(_bare(words[i]["word"])), -i))
+        if best is None:
+            content = [i for i in cands if len(_bare(words[i]["word"])) >= 4
+                       and _bare(words[i]["word"]).isalpha() and _bare(words[i]["word"]) not in _STOPWORDS]
+            if content:
+                best = max(content, key=lambda i: (len(_bare(words[i]["word"])), -i))
+        if best is not None:
+            picked.add(best)
+    return picked
 
 
 def _ass_colour(hex_rgb: str, alpha: int = 0) -> str:
@@ -378,15 +465,16 @@ def fit_caption_chunks(chunks: list[list[dict]], cfg: dict | None = None) -> lis
 
 
 def generate_dypol_ass(words: list[dict], output_path: Path, video_width: int = 1080,
-                       video_height: int = 1920) -> Path:
-    """Word-level ASS karaoke in the DYPOL look.
+                       video_height: int = 1920, keywords: list[str] | None = None) -> Path:
+    """Chunked ASS captions in the DYPOL look, with key words highlighted.
 
     2-4 words per chunk, Space Grotesk Bold (vendored in style/fonts; the ass filter
-    is given that fontsdir), off-white with a slate stroke and soft shadow; the
-    word being spoken turns lime. Chunks sit centred at ~63% of the height inside
-    x 100-900, so they never enter the bottom 22% or right 14% Shorts UI. A chunk
-    too wide for the band is set smaller rather than wrapped. One Dialogue event per
-    word; events in a chunk are contiguous, so the line never flickers.
+    is given that fontsdir), off-white with a slate stroke and soft shadow. Only key
+    words turn lime: numbers / percentages / years, plus at most one key term per
+    sentence (select_key_words); everything else stays plain white. Chunks sit
+    centred at 75% of the height inside x 100-900, with the whole block above the
+    bottom 20% and clear of the right 14% Shorts UI. A chunk too wide for the band is
+    set smaller rather than wrapped. One Dialogue event per chunk.
     """
     from .style import load_style
     cfg = DYPOL_CAPTION
@@ -412,6 +500,7 @@ Style: Dypol,{cfg['font']},{cfg['size']},{white},{lime},{stroke},{shadow},-1,0,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    key = {id(words[i]) for i in select_key_words(words, keywords)}
     chunks = fit_caption_chunks(dypol_caption_chunks(words), cfg)
     events = []
     for gi, chunk in enumerate(chunks):
@@ -421,27 +510,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         line_end = chunk[-1]["end"] + 0.25
         if next_start is not None:
             line_end = min(line_end, next_start)
-        line_end = max(line_end, chunk[-1]["end"])
+        line_end = max(line_end, chunk[-1]["end"], chunk[0]["start"] + 0.05)
         plain = " ".join(str(w["word"]) for w in chunk)
         fs = _chunk_font_size(plain, cfg["size"], cfg["max_width"], cfg["min_size"], cfg["outline"])
-        for ai, active in enumerate(chunk):
-            start = active["start"]
-            end = chunk[ai + 1]["start"] if ai + 1 < len(chunk) else line_end
-            end = max(end, start + 0.05)
-            lead = f"{{\\an5\\pos({cx},{cy})" + (f"\\fs{fs}" if fs != cfg["size"] else "")
-            if ai == 0:   # chunk enters with a small 90 ms pop
-                lead += "\\fad(60,0)\\fscx92\\fscy92\\t(0,90,\\fscx100\\fscy100)"
-            elif ai == len(chunk) - 1:
-                lead += "\\fad(0,60)"
-            lead += "}"
-            parts = []
-            for j, w in enumerate(chunk):
-                word = _ass_escape(w["word"])
-                parts.append(f"{{\\c{lime_i}}}{word}{{\\c{white_i}}}" if j == ai else word)
-            events.append(f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Dypol,,0,0,0,,"
-                          + lead + " ".join(parts))
+        lead = f"{{\\an5\\pos({cx},{cy})" + (f"\\fs{fs}" if fs != cfg["size"] else "")
+        # chunk enters with a small 90 ms pop and fades out
+        lead += "\\fad(60,60)\\fscx92\\fscy92\\t(0,90,\\fscx100\\fscy100)}"
+        parts = []
+        for w in chunk:
+            word = _ass_escape(w["word"])
+            parts.append(f"{{\\c{lime_i}}}{word}{{\\c{white_i}}}" if id(w) in key else word)
+        events.append(f"Dialogue: 0,{_format_ass_time(chunk[0]['start'])},{_format_ass_time(line_end)},Dypol,,0,0,0,,"
+                      + lead + " ".join(parts))
     Path(output_path).write_text(header + "\n".join(events) + "\n", encoding="utf-8")
-    log(f"DYPOL ASS captions saved: {Path(output_path).name} ({len(chunks)} chunks)")
+    log(f"DYPOL ASS captions saved: {Path(output_path).name} ({len(chunks)} chunks, {len(key)} key words)")
     return Path(output_path)
 
 
@@ -491,6 +573,7 @@ def generate_captions(
     font_family: str = "Arial",
     font_size: int = 92,
     script: str = "",
+    keywords: list[str] | None = None,
 ) -> dict:
     """Generate captions: ASS (for burn-in) + SRT (for YouTube upload).
 
@@ -540,7 +623,7 @@ def generate_captions(
     # Generate ASS for burn-in (niche-aware highlight color)
     ass_path = work_dir / f"captions_{lang}.ass"
     if use_dypol_captions(lang):
-        generate_dypol_ass(words, ass_path)
+        generate_dypol_ass(words, ass_path, keywords=keywords)
     else:
         _generate_ass(
             words, ass_path,
