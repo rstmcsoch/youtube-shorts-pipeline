@@ -1,0 +1,15 @@
+{
+  "job_id": "job-mvzc5r81-haujp1",
+  "run_id": "42047281338",
+  "phase": "publish",
+  "status": "failed",
+  "videos": [],
+  "video_count": 0,
+  "youtube_id": "",
+  "youtube_url": "",
+  "failure_category": "publish",
+  "log_excerpt": "",
+  "recorded_at": "2026-11-05T14:41:13Z",
+  "producing_run_id": "41459351729",
+  "draft_source": "durable-snapshot"
+}
