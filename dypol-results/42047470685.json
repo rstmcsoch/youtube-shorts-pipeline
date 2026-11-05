@@ -1,0 +1,15 @@
+{
+  "job_id": "job-mvzbbzg8-p9zy4x",
+  "run_id": "42047470685",
+  "phase": "publish",
+  "status": "failed",
+  "videos": [],
+  "video_count": 0,
+  "youtube_id": "",
+  "youtube_url": "",
+  "failure_category": "publish",
+  "log_excerpt": "",
+  "recorded_at": "2026-11-05T15:07:01Z",
+  "producing_run_id": "",
+  "draft_source": ""
+}
