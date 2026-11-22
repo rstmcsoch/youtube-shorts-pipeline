@@ -96,18 +96,19 @@ def test_sfx_offset_at_least_18_db():
     assert all(g <= 0 for g in sfx.TRANSITION_GAIN.values())
 
 
-def test_rendered_sfx_peak_18db_under_voice_even_when_overlapping(tmp_path):
+def test_rendered_sfx_loudness_22db_under_voice_even_when_overlapping(tmp_path):
     np = pytest.importorskip("numpy")
     voice = tmp_path / "v.wav"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=f=220:d=4:sample_rate=48000",
                     "-af", "volume=-3dB", str(voice)], check=True)
     ev = [{"t": 1.0, "at": 1.0, "clip": c, "kind": "transition", "gain_db": 0.0}
-          for c in ("whoosh_01", "chime_01", "swell_01")]
+          for c in ("chime_02", "chime_01", "swell_01")]
     out = sfx.render_sfx_track(ev, 4.0, voice, tmp_path / "s.wav")
     with wave.open(str(out)) as w:
         x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2") / 32767
     v = sfx._decode(voice)
-    assert 20 * np.log10(np.abs(v).max()) - 20 * np.log10(np.abs(x).max()) >= 18.0
+    # loudness-based now: even three stacked effects stay >= 22 LU under the voice
+    assert sfx.integrated_lufs(v) - sfx.integrated_lufs(x) >= 22.0
 
 
 def test_no_kenney_pop_impact_click_files_referenced():

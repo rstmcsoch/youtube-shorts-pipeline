@@ -90,9 +90,9 @@ def test_enforce_hook_takes_a_better_rewrite(monkeypatch):
 
 
 def test_transitions_sit_under_the_hook_impact():
-    assert set(TRANSITION_GAIN) == {"chime", "whoosh", "swell"}
+    assert set(TRANSITION_GAIN) == {"chime", "swell"}
     assert all(g <= 0 for g in TRANSITION_GAIN.values())
-    assert TRANSITION_GAIN["chime"] > TRANSITION_GAIN["whoosh"]
+    assert TRANSITION_GAIN["chime"] > TRANSITION_GAIN["swell"]
 
 
 def test_no_niche_hook_template_is_setup():

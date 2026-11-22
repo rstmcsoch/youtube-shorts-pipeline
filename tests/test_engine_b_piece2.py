@@ -183,8 +183,8 @@ class TestSfx:
     def test_manifest_is_procedural(self):
         m = sfx.load_manifest()
         clips = m["clips"]
-        assert 4 <= len(clips) <= 10 and "procedural" in m["license"]
-        assert {c["category"] for c in clips} == {"whoosh", "chime", "swell"}
+        assert 3 <= len(clips) <= 10 and "procedural" in m["license"]
+        assert {c["category"] for c in clips} == {"chime", "swell"}
         for c in clips:
             x = sfx.synth_clip(c)
             assert len(x) == int(round(c["duration_s"] * sfx.SR)) and abs(float(abs(x).max()) - 1.0) < 1e-3
@@ -198,11 +198,12 @@ class TestSfx:
         assert 6 <= rate <= 12
         trans = [e for e in ev if e["kind"] == "transition"]
         assert all(a["clip"] != b["clip"] for a, b in zip(trans, trans[1:]))
-        assert {e["clip"].split("_")[0] for e in trans} == {"whoosh", "chime"}
+        assert {e["clip"].split("_")[0] for e in trans} == {"chime"}
 
-    def test_floor_uses_subcuts_when_few_beats(self):
+    def test_subcuts_never_exceed_one_per_section(self):
         ev = sfx.plan_sfx(60.0, [30.0], sub_cuts=[float(t) for t in range(3, 60, 3)])
-        assert sfx.transitions_per_minute(ev, 60.0) >= 6
+        # two sections (0-30, 30-60): the hook owns the first, one effect in the second
+        assert len(ev) == 2 and ev[0]["kind"] == "hook" and ev[1]["at"] >= 30.0
 
     def test_typing_is_silent_and_swell_lands(self):
         ev = sfx.plan_sfx(20.0, [5.0, 10.0, 15.0], typing=[(10.3, 12.0)], riser_at=10.0)
@@ -212,7 +213,7 @@ class TestSfx:
         dur = next(c for c in sfx.load_manifest()["clips"] if c["id"] == riser["clip"])["duration_s"]
         assert abs(riser["t"] + dur - 10.0) < 0.01
 
-    def test_whoosh_peak_lands_on_cut(self):
+    def test_chime_peak_lands_on_cut(self):
         ev = sfx.plan_sfx(30.0, [10.0, 20.0], hook_t=0.0)
         for e in ev:
             if e["kind"] == "transition":
@@ -224,13 +225,13 @@ class TestSfx:
         voice = tmp_path / "v.wav"
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=f=220:d=4:sample_rate=48000",
                         "-af", "volume=-6dB", str(voice)], check=True)
-        ev = [{"t": 1.0, "at": 1.0, "clip": "whoosh_02", "kind": "transition", "gain_db": 0.0}]
+        ev = [{"t": 1.0, "at": 1.0, "clip": "chime_02", "kind": "transition", "gain_db": 0.0}]
         out = sfx.render_sfx_track(ev, 4.0, voice, tmp_path / "s.wav")
         with wave.open(str(out)) as w:
             x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2") / 32767
         v = sfx._decode(voice)
-        diff = 20 * np.log10(np.abs(v).max()) - 20 * np.log10(np.abs(x).max())
-        assert 19.0 <= diff <= 21.0
+        diff = sfx.integrated_lufs(v) - sfx.integrated_lufs(x)
+        assert 23.0 <= diff <= 25.0
         assert len(x) == 4 * 48000
 
     def test_empty_plan_renders_nothing(self, tmp_path):
