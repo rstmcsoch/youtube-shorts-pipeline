@@ -2,7 +2,7 @@
 
 import concurrent.futures
 
-from ..config import load_config, get_anthropic_client, get_claude_backend, call_claude_cli, NICHE_TO_SUBREDDITS
+from ..config import load_config, NICHE_TO_SUBREDDITS
 from ..log import log
 from .base import TopicCandidate
 
@@ -106,27 +106,35 @@ class TopicEngine:
         return unique[:limit]
 
     def auto_pick(self, candidates: list[TopicCandidate]) -> str:
-        """Use Claude to pick the best topic for a YouTube Short."""
+        """Pick the best topic for a YouTube Short with whatever LLM is configured.
+
+        DYPOL (23 Nov 2026): the pipeline runs on Gemini, so a blank topic used to crash
+        with "No Claude access found". This now uses llm.call_llm (Gemini first), prefers
+        everyday-AI explainer angles, and falls back to the top-ranked candidate so a
+        missing topic never fails the run.
+        """
+        if not candidates:
+            raise RuntimeError("No topic candidates found and no topic was given.")
         topics_text = "\n".join(
             f"{i+1}. [{t.source}] {t.title} (score: {t.trending_score:.2f})"
             for i, t in enumerate(candidates[:20])
         )
 
-        prompt = f"""Pick the single best topic from this list for a viral YouTube Short (60-90 sec).
-Consider: visual potential, broad appeal, timeliness, controversy/surprise factor.
+        prompt = f"""Pick the single best topic from this list for a calm, clear YouTube Short (45-60 sec)
+that explains how AI or technology works in everyday life.
+Prefer: visual potential, broad appeal, something a viewer can learn from, no named private people.
+Avoid: politics, tragedy, celebrity gossip, anything that needs a person's name.
+If none fit, rewrite the most suitable one as a short everyday-AI explainer title.
 
 {topics_text}
 
 Reply with ONLY the topic title text, nothing else."""
 
-        backend = get_claude_backend()
-        if backend == "api":
-            client = get_anthropic_client()
-            msg = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=200,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text.strip()
-        else:
-            return call_claude_cli(prompt, max_tokens=200)
+        try:
+            from ..llm import call_llm
+            picked = (call_llm(prompt, max_tokens=200) or "").strip().strip('"').splitlines()[0].strip()
+            if picked:
+                return picked[:120]
+        except Exception as exc:  # noqa: BLE001 - never fail the run on topic choice
+            log(f"Topic auto-pick via LLM failed ({exc}); using top-ranked candidate")
+        return candidates[0].title
